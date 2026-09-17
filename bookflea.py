@@ -13,11 +13,17 @@
 Власний пошук сайту (`?q=`) нечіткий: на «Бункер» він віддає «Альманах Сталкер»,
 на «Фундація» — Беґбедера. Тому він тут використовується лише як генератор
 кандидатів, а остаточне рішення ухвалює локальна перевірка `matches_keyword()`.
+
+⚠ Букфлі — це кілька окремих ринків за країнами (UA, PL, DE). Анонімному
+клієнту країну обирає сервер за IP, і раннер GitHub Actions (США) бачить
+ПОЛЬСЬКИЙ каталог: інші оголошення, ціни в злотих. Лікує це логін — країна в
+профілі користувача визначає, які оголошення він бачить (див. `ensure_login`).
 """
 
 from __future__ import annotations
 
 import logging
+import os
 import random
 import re
 import time
@@ -33,9 +39,23 @@ log = logging.getLogger("bookflea")
 
 BASE = "https://www.bookflea.co"
 SEARCH = BASE + "/search"
+LOGIN = BASE + "/api/auth/login"
 
-_PRICE_RE = re.compile(r"(\d[\d\s  ]*)(?:[.,](\d+))?\s*(грн|₴|\$|€|usd|eur)?", re.I)
-_CURRENCY = {"грн": "UAH", "₴": "UAH", "$": "USD", "usd": "USD", "€": "EUR", "eur": "EUR"}
+# Що бачив останній прогін: валюти й кількість карток. Читає main.py, щоб
+# попередити в Telegram, якщо нам знову підсунули не той ринок.
+LAST_SCAN: dict[str, object] = {"currencies": set(), "cards": 0}
+
+# Стан логіну в межах одного запуску: ("skip" | "ok" | "fail", пояснення)
+LOGIN_STATE: tuple[str, str] = ("skip", "облікові дані не задані")
+
+_PRICE_RE = re.compile(
+    r"(\d[\d\s  ]*)(?:[.,](\d+))?\s*(грн|₴|zł|zl|pln|\$|€|usd|eur)?", re.I
+)
+_CURRENCY = {
+    "грн": "UAH", "₴": "UAH",
+    "zł": "PLN", "zl": "PLN", "pln": "PLN",   # Букфлі має ще й польський ринок
+    "$": "USD", "usd": "USD", "€": "EUR", "eur": "EUR",
+}
 
 
 class BookfleaError(RuntimeError):
@@ -76,7 +96,10 @@ def _parse_price(text: str) -> tuple[float | None, str | None, str]:
         value = float(f"{whole}.{frac}")
     except ValueError:
         return None, None, raw
-    return value, _CURRENCY.get((m.group(3) or "грн").lower(), "UAH"), raw
+    token = (m.group(3) or "").lower()
+    # Валюту НЕ вгадуємо: якщо позначки немає — лишаємо None, і фільтр валюти
+    # відкине таку ціну, замість того щоб мовчки вважати її гривнями.
+    return value, _CURRENCY.get(token), raw
 
 
 def _original_photo(img) -> str | None:
@@ -251,6 +274,94 @@ def _get(session: Fetcher, url: str, *, retries: int = 3) -> str:
     raise BookfleaError(f"Не вдалось завантажити {url}: {last}")
 
 
+def _authenticated(session: Fetcher) -> bool:
+    """Чи бачить нас сервер залогіненими: анонімного /me кидає на /auth."""
+    _, me = session.get(BASE + "/me", referer=BASE + "/")
+    return "Мій профіль" in me
+
+
+def ensure_login(session: Fetcher, *, email: str | None = None, password: str | None = None,
+                 cookie: str | None = None) -> bool:
+    """Робить сесію авторизованою: спершу готовою кукі, потім логіном.
+
+    Навіщо взагалі. Каталог Букфлі розділений за країнами (UA, PL, DE). Для
+    анонімного відвідувача країну обирає сервер за IP, тому раннер GitHub
+    Actions у США бачить польський каталог — геть інші оголошення й ціни в
+    злотих. У профілі поле «Країна» підписане «визначає, де будуть
+    публікуватися твої оголошення та які оголошення ти побачиш на сайті», тож
+    авторизована сесія має повертати каталог країни акаунта з будь-якого IP.
+
+    Порядок:
+
+    1. `BOOKFLEA_COOKIE` — рядок заголовка Cookie, покладений вручну. Якщо він
+       ще живий, це нуль зайвих запитів і нуль зайвих сесій на сервері.
+    2. Якщо кукі протухла (або її нема) — `POST /api/auth/login` з
+       `BOOKFLEA_EMAIL` / `BOOKFLEA_PASSWORD`. Свіжі кукі осідають у сесії.
+
+    Перевіряємо не слово сервера, а факт: тягнемо `/me`. Викликати можна
+    скільки завгодно разів — робота робиться один раз за запуск.
+    """
+    global LOGIN_STATE
+
+    email = email if email is not None else os.getenv("BOOKFLEA_EMAIL", "")
+    password = password if password is not None else os.getenv("BOOKFLEA_PASSWORD", "")
+    cookie = cookie if cookie is not None else os.getenv("BOOKFLEA_COOKIE", "")
+
+    if LOGIN_STATE[0] in ("cookie", "ok"):
+        return True
+
+    # ---- 1. готова кукі
+    if cookie:
+        session.set_cookie_header("bookflea.co", cookie.strip())
+        try:
+            if _authenticated(session):
+                LOGIN_STATE = ("cookie", "готова кукі ще жива")
+                log.info("  ✔ сесія з BOOKFLEA_COOKIE ще жива — логін не потрібен")
+                return True
+            log.info("  BOOKFLEA_COOKIE протухла — логінюсь заново")
+        except Exception as exc:  # noqa: BLE001
+            log.warning("  не вдалось перевірити BOOKFLEA_COOKIE (%s) — пробую логін", exc)
+        # Прибираємо мертву кукі, інакше вона перебиватиме свіжі після логіну.
+        session.set_cookie_header("bookflea.co", None)
+
+    # ---- 2. звичайний логін
+    if not email or not password:
+        reason = ("BOOKFLEA_COOKIE протухла, а пароля для перелогіну немає"
+                  if cookie else "BOOKFLEA_EMAIL/BOOKFLEA_PASSWORD не задані")
+        LOGIN_STATE = ("fail" if cookie else "skip", reason)
+        log.info("  %s — йду анонімно (з-за меж України це інший каталог!)", reason)
+        return False
+
+    try:
+        status, body = session.post_json(LOGIN, {"email": email, "password": password}, referer=BASE + "/auth")
+    except Exception as exc:  # noqa: BLE001
+        LOGIN_STATE = ("fail", f"запит не пройшов: {exc}")
+        log.warning("  ✖ логін не вдався: %s", exc)
+        return False
+
+    if status != 200:
+        # Тіло — коротке JSON-повідомлення виду {"error": "Invalid credentials"}.
+        LOGIN_STATE = ("fail", f"HTTP {status}: {body[:120]}")
+        log.warning("  ✖ логін не вдався: HTTP %s %s", status, body[:120])
+        return False
+
+    try:
+        ok = _authenticated(session)
+    except Exception as exc:  # noqa: BLE001
+        LOGIN_STATE = ("fail", f"не вдалось перевірити /me: {exc}")
+        log.warning("  ✖ не вдалось перевірити логін: %s", exc)
+        return False
+
+    if not ok:
+        LOGIN_STATE = ("fail", "після логіну /me все одно віддає сторінку входу")
+        log.warning("  ✖ логін начебто пройшов, але /me віддає сторінку входу")
+        return False
+
+    LOGIN_STATE = ("ok", email)
+    log.info("  ✔ залогінився як %s", email)
+    return True
+
+
 def search(session: Fetcher, keyword: str, *, page_size: int = 24) -> list[Ad]:
     url = f"{SEARCH}?pageSize={page_size}&q={quote(keyword)}"
     return parse_listings(_get(session, url))
@@ -273,11 +384,23 @@ def collect(session: Fetcher, keywords: list[str], *, mode: str = "search",
     Другий елемент — повний список id зі сканованої сторінки. Він потрібен
     для перевірки «чи не проґавили ми щось»: якщо між запусками вікно
     провернулось повністю, значить page_size замалий.
+
+    Побіжно запам'ятовує в `LAST_SCAN`, які валюти трапились: це найдешевший
+    спосіб помітити, що сервер підсунув каталог іншої країни.
     """
     found: dict[str, Ad] = {}
+    ensure_login(session)
+    LAST_SCAN["currencies"] = set()
+    LAST_SCAN["cards"] = 0
+
+    def remember(ads: list[Ad]) -> None:
+        LAST_SCAN["cards"] = int(LAST_SCAN["cards"]) + len(ads)  # type: ignore[arg-type]
+        seen_cur: set[str] = LAST_SCAN["currencies"]  # type: ignore[assignment]
+        seen_cur.update(a.currency for a in ads if a.currency)
 
     if mode == "latest":
         page = latest(session, page_size=page_size)
+        remember(page)
         for ad in page:
             kw = matches_keyword(ad, keywords)
             if kw:
@@ -298,6 +421,7 @@ def collect(session: Fetcher, keywords: list[str], *, mode: str = "search",
         except BookfleaError as exc:
             log.warning("  «%s»: %s", kw, exc)
             continue
+        remember(candidates)
         hits = 0
         for ad in candidates:
             window.append(ad.id)

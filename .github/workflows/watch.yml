@@ -47,6 +47,9 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          BOOKFLEA_EMAIL: ${{ secrets.BOOKFLEA_EMAIL }}
+          BOOKFLEA_PASSWORD: ${{ secrets.BOOKFLEA_PASSWORD }}
+          BOOKFLEA_COOKIE: ${{ secrets.BOOKFLEA_COOKIE }}
           # Необов'язково — якщо хочете ще й e-mail:
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
           SMTP_PORT: ${{ secrets.SMTP_PORT }}

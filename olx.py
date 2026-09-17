@@ -150,8 +150,11 @@ def price_ok(ad: Ad, *, max_price: float | None, min_price: float | None,
              currency: str | None, allow_no_price: bool = False) -> bool:
     if ad.price is None:
         return allow_no_price
-    if currency and ad.currency and ad.currency.upper() != currency.upper():
-        return False
+    if currency:
+        # Невідома валюта — теж привід відмовити: краще пропустити оголошення,
+        # ніж прийняти 220 zł за 220 грн.
+        if not ad.currency or ad.currency.upper() != currency.upper():
+            return False
     if max_price is not None and ad.price > max_price:
         return False
     if min_price is not None and ad.price < min_price:

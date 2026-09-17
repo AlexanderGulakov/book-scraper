@@ -78,8 +78,30 @@ class Fetcher:
         self.ua = UA_BY_IMPERSONATE.get(self.impersonate, DEFAULT_UA)
         self._session = None
         self._warmed = False
+        # Готові кукі, прив'язані до домену: {"bookflea.co": "session=…; other=…"}.
+        # Одна сесія обслуговує і OLX, і Букфлі, тому кукі одного сайту не сміють
+        # поїхати на інший — звідси прив'язка до хоста, а не спільний заголовок.
+        self._cookie_headers: dict[str, str] = {}
         log.info("Мережевий бекенд: %s%s", self.backend,
                  f" (impersonate={self.impersonate})" if self.backend == "curl_cffi" else "")
+
+    # ------------------------------------------------------------------ кукі
+
+    def set_cookie_header(self, host: str, value: str | None) -> None:
+        """Слати цей рядок Cookie на вказаний домен (None — прибрати)."""
+        host = host.lower().lstrip(".")
+        if value:
+            self._cookie_headers[host] = value
+        else:
+            self._cookie_headers.pop(host, None)
+
+    def _cookie_for(self, url: str) -> str | None:
+        from urllib.parse import urlparse
+        hostname = (urlparse(url).hostname or "").lower()
+        for host, value in self._cookie_headers.items():
+            if hostname == host or hostname.endswith("." + host):
+                return value
+        return None
 
     # ---------------------------------------------------------------- session
 
@@ -109,7 +131,28 @@ class Fetcher:
     def get(self, url: str, *, timeout: int = 30, referer: str | None = None):
         """Повертає (status_code, text). Винятків мережі не ковтає."""
         headers = browser_headers(self.ua, referer=referer)
+        cookie = self._cookie_for(url)
+        if cookie:
+            headers["Cookie"] = cookie
         r = self.session.get(url, headers=headers, timeout=timeout, allow_redirects=True)
+        return r.status_code, r.text
+
+    def post_json(self, url: str, payload: dict, *, timeout: int = 30, referer: str | None = None):
+        """POST з JSON-тілом. Кукі відповіді лишаються в сесії — на цьому тримається логін."""
+        headers = browser_headers(self.ua, referer=referer)
+        headers.update({
+            "Accept": "application/json, text/plain, */*",
+            "Content-Type": "application/json",
+            "Sec-Fetch-Dest": "empty",
+            "Sec-Fetch-Mode": "cors",
+            "Sec-Fetch-Site": "same-origin",
+        })
+        headers.pop("Sec-Fetch-User", None)
+        headers.pop("Upgrade-Insecure-Requests", None)
+        cookie = self._cookie_for(url)
+        if cookie:
+            headers["Cookie"] = cookie
+        r = self.session.post(url, json=payload, headers=headers, timeout=timeout, allow_redirects=True)
         return r.status_code, r.text
 
     def warmup(self) -> bool:
