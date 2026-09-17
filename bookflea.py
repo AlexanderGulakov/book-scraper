@@ -95,11 +95,71 @@ def _original_photo(img) -> str | None:
     return urljoin(BASE, src)
 
 
+_ANCHOR_RE = re.compile(r'<a\s+href="(/ads/[^"]+)"', re.I)
+_ALT_RE = re.compile(r'<img[^>]*\salt="([^"]*)"', re.I)
+_SPAN_SM_RE = re.compile(r'<span[^>]*class="[^"]*\btext-sm\b[^"]*"[^>]*>(.*?)</span>', re.I | re.S)
+_SPAN_BASE_RE = re.compile(r'<span[^>]*class="[^"]*\btext-base\b[^"]*"[^>]*>(.*?)</span>', re.I | re.S)
+_B_RE = re.compile(r"<b>(.*?)</b>", re.I | re.S)
+_TAGS_RE = re.compile(r"<[^>]+>")
+
+
+def _soup(html: str) -> BeautifulSoup:
+    """lxml розбирає «брудний» HTML як браузер; html.parser — запасний варіант."""
+    for parser in ("lxml", "html.parser"):
+        try:
+            return BeautifulSoup(html, parser)
+        except Exception:  # noqa: BLE001 - lxml може бути не встановлений
+            continue
+    return BeautifulSoup(html, "html.parser")
+
+
+def _clean(s: str | None) -> str | None:
+    if not s:
+        return None
+    import html as _html
+    return _html.unescape(_TAGS_RE.sub("", s)).strip() or None
+
+
+def parse_from_raw(html: str) -> dict[str, dict[str, str | None]]:
+    """Витягує поля прямо з тексту сторінки, не покладаючись на дерево DOM.
+
+    Запасний шлях: якщо парсер HTML з якоїсь причини не зібрав картку
+    (інша версія бібліотеки, зламана розмітка, обрізана відповідь), розмітка
+    Букфлі достатньо машинна, щоб прочитати її регулярками.
+    """
+    out: dict[str, dict[str, str | None]] = {}
+    matches = list(_ANCHOR_RE.finditer(html))
+    for i, m in enumerate(matches):
+        end = matches[i + 1].start() if i + 1 < len(matches) else min(len(html), m.end() + 4000)
+        block = html[m.start():end]
+        ad_id = m.group(1).rstrip("/").split("/")[-1]
+        if ad_id in out:
+            continue
+        alt = _ALT_RE.search(block)
+        alt_title = alt_author = None
+        if alt:
+            parts = [p.strip() for p in _clean(alt.group(1)).split("—")] if _clean(alt.group(1)) else []
+            alt_title = parts[0] if parts else None
+            alt_author = parts[1] if len(parts) > 1 else None
+        sm = _SPAN_SM_RE.search(block)
+        base = _SPAN_BASE_RE.search(block)
+        b = _B_RE.search(block)
+        out[ad_id] = {
+            "author": _clean(sm.group(1)) if sm else alt_author,
+            "title": _clean(base.group(1)) if base else alt_title,
+            "price": _clean(b.group(1)) if b else None,
+        }
+    return out
+
+
 def parse_listings(html: str) -> list[Ad]:
-    soup = BeautifulSoup(html, "html.parser")
+    soup = _soup(html)
     anchors = soup.select('a[href^="/ads/"]')
     if not anchors and "bookflea" not in html.lower():
         raise BookfleaError("Відповідь не схожа на сторінку Bookflea (капча чи редирект?)")
+
+    # Текстовий розбір тієї ж сторінки — страховка, якщо дерево DOM зібралось не так.
+    raw = parse_from_raw(html)
 
     out: list[Ad] = []
     seen: set[str] = set()
@@ -133,7 +193,16 @@ def parse_listings(html: str) -> list[Ad]:
                 author, title = author or spans[0], spans[1]
 
         b = a.find("b")
-        price, currency, price_text = _parse_price(b.get_text(strip=True) if b else "")
+        price_raw = b.get_text(strip=True) if b else ""
+
+        # Якщо дерево дало порожню картку — беремо те, що видно в самому тексті.
+        fb = raw.get(ad_id)
+        if fb:
+            author = author or fb.get("author")
+            title = title or fb.get("title")
+            price_raw = price_raw or (fb.get("price") or "")
+
+        price, currency, price_text = _parse_price(price_raw)
 
         out.append(Ad(
             id=ad_id,
@@ -146,6 +215,20 @@ def parse_listings(html: str) -> list[Ad]:
             photo=_original_photo(img),
             source="bookflea",
         ))
+
+    blank = [a.id for a in out if a.title == "(без назви)"]
+    if blank:
+        # Це не має траплятись. Якщо трапилось — залишаємо в логу все, що
+        # потрібно, аби зрозуміти, що саме віддав сервер цього разу.
+        first = _ANCHOR_RE.search(html)
+        log.warning(
+            "⚠ %s з %s карток без назви. len(html)=%s, "
+            "text-base у тексті=%s, img alt у тексті=%s, парсер=%s",
+            len(blank), len(out), len(html),
+            html.count("text-base"), html.count("alt=\""), type(_soup("<i></i>").builder).__name__,
+        )
+        if first:
+            log.warning("  зразок розмітки: %s", html[first.start():first.start() + 400])
     return out
 
 
@@ -200,7 +283,12 @@ def collect(session: Fetcher, keywords: list[str], *, mode: str = "search",
             if kw:
                 ad.matched = kw
                 found[ad.id] = ad
-        log.info("  найновіші %s: збігів %s", len(page), len(found))
+        named = sum(1 for a in page if a.title != "(без назви)")
+        log.info("  найновіші %s (з назвою %s): збігів %s", len(page), named, len(found))
+        if page and not found:
+            log.info("  ключові слова: %s", ", ".join(keywords) or "(порожньо!)")
+            log.info("  перші 3 картки: %s",
+                     " | ".join(f"{a.author or '?'} — {a.title}" for a in page[:3]))
         return list(found.values()), [a.id for a in page]
 
     window: list[str] = []

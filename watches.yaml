@@ -1,8 +1,9 @@
 # Список того, за чим стежимо.
 # Кожен watch = одна сторінка пошуку OLX з уже застосованими фільтрами.
 #
-# ⚠ max_price у кожного свого — поставте свої числа замість 500.
-#   Це верхня межа в гривнях: дорожче не турбує.
+# ⚠ Наразі всюди max_price: 2000 — це тимчасова спільна заглушка.
+#   Це верхня межа в гривнях: дорожче не турбує. Поставте своє число
+#   для кожного пошуку окремо, коли буде зрозуміло, скільки що коштує.
 
 defaults:
   currency: UAH          # порівнюємо ціни лише в цій валюті
@@ -40,32 +41,32 @@ defaults:
 watches:
   - name: "Фундація (Азімов)"
     url: "https://www.olx.ua/uk/hobbi-otdyh-i-sport/knigi-zhurnaly/q-%D1%84%D1%83%D0%BD%D0%B4%D0%B0%D1%86%D1%96%D1%8F/?currency=UAH&search%5Border%5D=created_at%3Adesc"
-    max_price: 600
+    max_price: 2000
     exclude_keywords: ["копія", "репринт", "друк на замовлення", "електронна"]
 
   - name: "Рональду"
     url: "https://www.olx.ua/uk/hobbi-otdyh-i-sport/knigi-zhurnaly/q-%D1%80%D0%BE%D0%BD%D0%B0%D0%BB%D0%B4%D1%83/?currency=UAH&search%5Border%5D=created_at%3Adesc"
-    max_price: 500
+    max_price: 2000
 
   - name: "Макс Кідрук"
     url: "https://www.olx.ua/uk/hobbi-otdyh-i-sport/knigi-zhurnaly/q-%D0%BA%D1%96%D0%B4%D1%80%D1%83%D0%BA/?currency=UAH&search%5Border%5D=created_at%3Adesc"
-    max_price: 500
+    max_price: 2000
 
   - name: "Ден Браун"
     url: "https://www.olx.ua/uk/hobbi-otdyh-i-sport/knigi-zhurnaly/q-%D0%B4%D0%B5%D0%BD-%D0%B1%D1%80%D0%B0%D1%83%D0%BD/?currency=UAH&search%5Border%5D=created_at%3Adesc"
-    max_price: 500
+    max_price: 2000
 
   - name: "Відьмак"
     url: "https://www.olx.ua/uk/hobbi-otdyh-i-sport/knigi-zhurnaly/q-%D0%B2%D1%96%D0%B4%D1%8C%D0%BC%D0%B0%D0%BA/?currency=UAH&search%5Border%5D=created_at%3Adesc"
-    max_price: 500
+    max_price: 2000
 
   - name: "Гаррі Поттер"
     url: "https://www.olx.ua/uk/hobbi-otdyh-i-sport/knigi-zhurnaly/q-%D0%B3%D0%B0%D1%80%D1%80%D1%96-%D0%BF%D0%BE%D1%82%D1%82%D0%B5%D1%80/?currency=UAH&search%5Border%5D=created_at%3Adesc"
-    max_price: 500
+    max_price: 2000
 
   - name: "Бункер"
     url: "https://www.olx.ua/uk/hobbi-otdyh-i-sport/knigi-zhurnaly/q-%D0%B1%D1%83%D0%BD%D0%BA%D0%B5%D1%80/?currency=UAH&search%5Border%5D=created_at%3Adesc"
-    max_price: 500
+    max_price: 2000
 
   # ── Букфлі ────────────────────────────────────────────────────────────────
   # Один запит за прогін: /search?pageSize=48 — це найновіші 48 оголошень.
@@ -91,7 +92,7 @@ watches:
       - Служниця
       - Кідрук
       - Гаррі Поттер
-    # max_price: 500       # якщо розкоментувати — сповіщення лише про дешевше
+    max_price: 2000        # спільна межа-заглушка, потім налаштуєте
 
 # Шпаргалка по параметрах watch:
 #   max_price / min_price   межі ціни в гривнях

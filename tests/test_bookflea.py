@@ -136,6 +136,30 @@ def test_end_to_end_seed_then_notify(monkeypatch):
     assert "Анджей Сапковський" in msgs[0] and "«Відьмак»" in msgs[0]
 
 
+def test_survives_broken_tree_and_renamed_classes():
+    """Картка має читатись навіть якщо дерево DOM зібралось криво."""
+    broken = HTML.replace("</a>", "")          # парсер не закрив посилання
+    renamed = HTML.replace("text-sm", "zz").replace("text-base", "yy")  # інші класи
+
+    for label, variant in (("зламане дерево", broken), ("інші класи", renamed)):
+        ads = bookflea.parse_listings(variant)
+        titles = {a.title for a in ads}
+        assert "(без назви)" not in titles, f"{label}: картка лишилась порожньою"
+        assert "Відьмак. Останнє бажання. Книга 1" in titles, label
+        brown = next(a for a in ads if a.id == "i7z3xyj5k6kxyyjkuzhi17a4")
+        assert bookflea.matches_keyword(brown, KEYWORDS) == "Ден Браун", label
+
+
+def test_parse_from_raw_is_tree_independent():
+    data = bookflea.parse_from_raw(HTML)
+    assert data["u6x6e2e9y23tc3o84ln658dy"]["title"] == "Відьмак. Останнє бажання. Книга 1"
+    assert data["u6x6e2e9y23tc3o84ln658dy"]["author"] == "Анджей Сапковський"
+    assert data["t0g4szaa5e8ynkktc804kxam"]["price"] == "1 250 грн"
+    # картка, де лишився лише alt
+    assert data["onlyaltfallback00000001"]["title"] == "Фундація"
+    assert data["onlyaltfallback00000001"]["author"] == "Айзек Азімов"
+
+
 def test_warns_when_window_rotated_completely(monkeypatch):
     """Якщо між прогонами зі стрічки зникло геть усе — могли щось проґавити."""
     cfg = {"defaults": {}, "watches": [{
