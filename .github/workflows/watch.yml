@@ -1,8 +1,11 @@
 name: OLX watch
 
+# Розкладом керує зовнішній планувальник (cron-job.org), який раз на 15 хвилин
+# шле POST на .../actions/workflows/watch.yml/dispatches з тілом {"ref":"main"}.
+# Власний `schedule:` GitHub тут навмисно ВИДАЛЕНО: на цьому репозиторії він за
+# кілька годин не спрацював жодного разу, а якби ожив — давав би дублі, бо
+# concurrency ставить другий запуск у чергу замість того, щоб його відкинути.
 on:
-  schedule:
-    - cron: "8,24,39,53 * * * *"
   workflow_dispatch:
     inputs:
       mode:
@@ -10,9 +13,9 @@ on:
         type: choice
         default: normal
         options:
-          - normal
-          - dry-run
-          - probe
+          - normal      # звичайний прогін зі сповіщеннями
+          - dry-run     # знайти, показати в логах, нічого не надсилати
+          - probe       # діагностика 403: яка стратегія обходить блок
 
 concurrency:
   group: olx-watch
@@ -44,6 +47,13 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          # Необов'язково — якщо хочете ще й e-mail:
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          SMTP_TO: ${{ secrets.SMTP_TO }}
+          # Можна перевизначити, якщо probe покаже іншу робочу версію:
           OLX_BACKEND: ${{ vars.OLX_BACKEND || 'curl_cffi' }}
           OLX_IMPERSONATE: ${{ vars.OLX_IMPERSONATE || 'chrome131' }}
         run: |
