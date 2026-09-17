@@ -203,3 +203,37 @@ def test_prune():
 if __name__ == "__main__":
     import pytest
     raise SystemExit(pytest.main([__file__, "-q"]))
+
+
+def test_only_and_skip_select_watches():
+    """Букфлі крутиться вдома (потрібен український IP), OLX — у хмарі."""
+    import main as app
+
+    cfg = {"watches": [
+        {"name": "Відьмак", "url": "u"},
+        {"name": "Букфлі", "source": "bookflea", "keywords": []},
+    ]}
+    pick = lambda **kw: [w["name"] for i, w in enumerate(cfg["watches"])
+                         if app.wanted(w, i, kw.get("only", []), kw.get("skip", []))]
+
+    assert pick() == ["Відьмак", "Букфлі"]
+    assert pick(skip=["Букфлі"]) == ["Відьмак"]
+    assert pick(only=["Букфлі"]) == ["Букфлі"]
+    assert pick(skip=["bookflea"]) == ["Відьмак"], "можна і за source"
+    assert pick(only=["букфлі"]) == ["Букфлі"], "регістр не має значення"
+    assert pick(only=["Немає такого"]) == []
+
+
+def test_forget_orphans_drops_renamed_watches():
+    """Ключ стану — це name, тож перейменування лишає по собі мертвий запис."""
+    import main as app
+
+    cfg = {"watches": [{"name": "Роналду"}, {"name": "Вимкнений", "enabled": False}]}
+    state = {"version": 1, "watches": {
+        "Рональду": {"ads": {"x": {}}},      # стара назва з м'яким знаком
+        "Роналду": {"ads": {}},
+        "Вимкнений": {"ads": {"y": {}}},
+    }}
+
+    assert app.forget_orphans(cfg, state) == ["Рональду"]
+    assert set(state["watches"]) == {"Роналду", "Вимкнений"}, "вимкнений watch стан зберігає"

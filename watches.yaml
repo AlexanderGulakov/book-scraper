@@ -39,14 +39,24 @@ defaults:
     - nintendo
 
 watches:
+  # Без include_keywords сюди летіли птахи, церкви України та виборчі спори:
+  # зі слова «фундація» OLX робить «фундамент», «фонд» і просто книжки.
   - name: "Фундація (Азімов)"
     url: "https://www.olx.ua/uk/hobbi-otdyh-i-sport/knigi-zhurnaly/q-%D1%84%D1%83%D0%BD%D0%B4%D0%B0%D1%86%D1%96%D1%8F/?currency=UAH&search%5Border%5D=created_at%3Adesc"
     max_price: 2000
+    include_keywords: ["фундаці", "азімов", "азимов", "asimov"]
     exclude_keywords: ["копія", "репринт", "друк на замовлення", "електронна"]
 
-  - name: "Рональду"
+  # Пошук OLX нечіткий так само, як у Букфлі: на «роналду» він віддає Толкіна
+  # (Джон *Роналд* Руел), Роналда Дала, Анчелотті, Пеле і стікери Panini —
+  # 24 сторонніх оголошення з 40. Тому include_keywords: слово має бути в
+  # заголовку. "ronaldo" — щоб не втратити англомовні видання.
+  - name: "Роналду"
     url: "https://www.olx.ua/uk/hobbi-otdyh-i-sport/knigi-zhurnaly/q-%D1%80%D0%BE%D0%BD%D0%B0%D0%BB%D0%B4%D1%83/?currency=UAH&search%5Border%5D=created_at%3Adesc"
     max_price: 2000
+    include_keywords: ["роналду", "ronaldo"]
+    exclude_keywords: ["картина", "автограф", "толкин", "толкієн", "толкін",
+                       "роналд дал", "роналд руэл", "роналд рейел", "роналд р."]
 
   - name: "Макс Кідрук"
     url: "https://www.olx.ua/uk/hobbi-otdyh-i-sport/knigi-zhurnaly/q-%D0%BA%D1%96%D0%B4%D1%80%D1%83%D0%BA/?currency=UAH&search%5Border%5D=created_at%3Adesc"
@@ -64,9 +74,13 @@ watches:
     url: "https://www.olx.ua/uk/hobbi-otdyh-i-sport/knigi-zhurnaly/q-%D0%B3%D0%B0%D1%80%D1%80%D1%96-%D0%BF%D0%BE%D1%82%D1%82%D0%B5%D1%80/?currency=UAH&search%5Border%5D=created_at%3Adesc"
     max_price: 2000
 
+  # 27 з 40 було не по темі: довідник механізатора, залізобетонні конструкції
+  # і норії НК-50 (бо «бункер» — ще й деталь зернової техніки).
   - name: "Бункер"
     url: "https://www.olx.ua/uk/hobbi-otdyh-i-sport/knigi-zhurnaly/q-%D0%B1%D1%83%D0%BD%D0%BA%D0%B5%D1%80/?currency=UAH&search%5Border%5D=created_at%3Adesc"
     max_price: 2000
+    include_keywords: ["бункер"]
+    exclude_keywords: ["b.u.n.k.e.r", "норія", "нория", "сепаратор", "транспортер"]
 
   # ── Букфлі ────────────────────────────────────────────────────────────────
   # mode: search — окремий запит на кожне ключове слово, дев'ять за прогін.

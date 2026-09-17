@@ -22,11 +22,15 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
+import json
 import logging
 import os
 import random
 import re
 import time
+from datetime import datetime, timezone
 from typing import Iterable
 from urllib.parse import quote, unquote, urljoin, urlparse, parse_qs
 
@@ -45,8 +49,16 @@ LOGIN = BASE + "/api/auth/login"
 # попередити в Telegram, якщо нам знову підсунули не той ринок.
 LAST_SCAN: dict[str, object] = {"currencies": set(), "cards": 0}
 
-# Стан логіну в межах одного запуску: ("skip" | "ok" | "fail", пояснення)
+# Стан логіну в межах одного запуску, перший елемент:
+#   skip    — логін не налаштований, ідемо анонімно
+#   cookie  — під'їхали на готовій BOOKFLEA_COOKIE, запитів на логін не було
+#   ok      — залогінились паролем
+#   relogin — кукі була, але протухла; врятував пароль (пора оновити секрет)
+#   fail    — авторизуватись не вдалось
 LOGIN_STATE: tuple[str, str] = ("skip", "облікові дані не задані")
+
+# Коли спливає токен із BOOKFLEA_COOKIE, якщо його вдалось прочитати (UTC).
+COOKIE_EXPIRES_AT: "datetime | None" = None
 
 _PRICE_RE = re.compile(
     r"(\d[\d\s  ]*)(?:[.,](\d+))?\s*(грн|₴|zł|zl|pln|\$|€|usd|eur)?", re.I
@@ -274,6 +286,43 @@ def _get(session: Fetcher, url: str, *, retries: int = 3) -> str:
     raise BookfleaError(f"Не вдалось завантажити {url}: {last}")
 
 
+_JWT_RE = re.compile(r"\b([A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,})\b")
+
+
+def normalize_cookie(raw: str) -> str:
+    """Дозволяє класти в секрет і повний заголовок, і сам токен.
+
+    Сесія Букфлі тримається на одній кукі `accessToken`, тому «просто вставив
+    значення» — найімовірніший спосіб заповнити секрет. Якщо в рядку немає `=`,
+    вважаємо, що це голий токен, і дописуємо ім'я.
+    """
+    raw = (raw or "").strip().strip(";").strip()
+    if raw and "=" not in raw:
+        return f"accessToken={raw}"
+    return raw
+
+
+def cookie_expiry(raw: str) -> datetime | None:
+    """Коли спливає токен у кукі, якщо це JWT. Не вийшло прочитати — None.
+
+    Токен Букфлі живе близько місяця, тож попередити за кілька днів дешевше,
+    ніж дізнатись про це з тиші. Нічого, крім дати, звідси не береться.
+    """
+    soonest: datetime | None = None
+    for token in _JWT_RE.findall(raw or ""):
+        payload = token.split(".")[1]
+        try:
+            data = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+        except (ValueError, binascii.Error, UnicodeDecodeError):
+            continue
+        exp = data.get("exp") if isinstance(data, dict) else None
+        if not isinstance(exp, (int, float)):
+            continue
+        when = datetime.fromtimestamp(exp, tz=timezone.utc)
+        soonest = when if soonest is None or when < soonest else soonest
+    return soonest
+
+
 def _authenticated(session: Fetcher) -> bool:
     """Чи бачить нас сервер залогіненими: анонімного /me кидає на /auth."""
     _, me = session.get(BASE + "/me", referer=BASE + "/")
@@ -301,18 +350,23 @@ def ensure_login(session: Fetcher, *, email: str | None = None, password: str | 
     Перевіряємо не слово сервера, а факт: тягнемо `/me`. Викликати можна
     скільки завгодно разів — робота робиться один раз за запуск.
     """
-    global LOGIN_STATE
+    global LOGIN_STATE, COOKIE_EXPIRES_AT
 
     email = email if email is not None else os.getenv("BOOKFLEA_EMAIL", "")
     password = password if password is not None else os.getenv("BOOKFLEA_PASSWORD", "")
-    cookie = cookie if cookie is not None else os.getenv("BOOKFLEA_COOKIE", "")
+    cookie = normalize_cookie(cookie if cookie is not None else os.getenv("BOOKFLEA_COOKIE", ""))
 
-    if LOGIN_STATE[0] in ("cookie", "ok"):
+    if LOGIN_STATE[0] in ("cookie", "ok", "relogin"):
         return True
 
     # ---- 1. готова кукі
     if cookie:
-        session.set_cookie_header("bookflea.co", cookie.strip())
+        COOKIE_EXPIRES_AT = cookie_expiry(cookie)
+        if COOKIE_EXPIRES_AT:
+            left = COOKIE_EXPIRES_AT - datetime.now(timezone.utc)
+            log.info("  BOOKFLEA_COOKIE: токен дійсний до %s (%s дн.)",
+                     COOKIE_EXPIRES_AT.date().isoformat(), max(left.days, 0))
+        session.set_cookie_header("bookflea.co", cookie)
         try:
             if _authenticated(session):
                 LOGIN_STATE = ("cookie", "готова кукі ще жива")
@@ -357,8 +411,8 @@ def ensure_login(session: Fetcher, *, email: str | None = None, password: str | 
         log.warning("  ✖ логін начебто пройшов, але /me віддає сторінку входу")
         return False
 
-    LOGIN_STATE = ("ok", email)
-    log.info("  ✔ залогінився як %s", email)
+    LOGIN_STATE = ("relogin", "кукі протухла, врятував пароль") if cookie else ("ok", email)
+    log.info("  ✔ залогінився як %s%s", email, " (замість протухлої кукі)" if cookie else "")
     return True
 
 

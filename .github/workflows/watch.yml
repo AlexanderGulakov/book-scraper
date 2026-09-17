@@ -59,8 +59,8 @@ jobs:
           # Можна перевизначити, якщо probe покаже іншу робочу версію:
           OLX_BACKEND: ${{ vars.OLX_BACKEND || 'curl_cffi' }}
           OLX_IMPERSONATE: ${{ vars.OLX_IMPERSONATE || 'chrome131' }}
-        run: |
-          python main.py ${{ inputs.mode == 'dry-run' && '--dry-run' || '' }}
+          run: |
+            python main.py --skip Букфлі ${{ inputs.mode == 'dry-run' && '--dry-run' || '' }}
 
       - name: Commit state
         if: always() && inputs.mode != 'probe'

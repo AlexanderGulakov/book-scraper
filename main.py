@@ -83,6 +83,57 @@ def due(watch_state: dict[str, Any], interval_minutes: Any) -> bool:
     return datetime.now(timezone.utc) - prev >= timedelta(minutes=float(interval_minutes) - 1)
 
 
+def bookflea_notes(name: str, opt: dict[str, Any], ws: dict[str, Any]) -> list[str]:
+    """Повідомлення про стан сесії та ринку Букфлі — не частіше разу на зміну.
+
+    Букфлі розділений за країнами і вибирає її за IP клієнта, тому чужа валюта
+    у видачі пояснює мовчазний нуль збігів краще за будь-який лог. Але писати
+    про це щопівгодини — знущання, тож шлемо лише коли змінилась сигнатура.
+    """
+    expected = str(opt.get("currency", "UAH")).upper()
+    seen_cur = {str(c).upper() for c in (bookflea.LAST_SCAN.get("currencies") or set())}
+    foreign = seen_cur - {expected}
+    login_state, login_note = bookflea.LOGIN_STATE
+
+    # Токен у BOOKFLEA_COOKIE живе близько місяця. Нагадати за тиждень дешевше,
+    # ніж дізнатись про його смерть із раптової тиші.
+    expires = bookflea.COOKIE_EXPIRES_AT
+    days_left = (expires - datetime.now(timezone.utc)).days if expires else None
+    expiring = expires.date().isoformat() if days_left is not None and days_left <= 7 else ""
+
+    if foreign:
+        log.warning("  ⚠ валюти у видачі: %s (очікуємо %s)", ", ".join(sorted(seen_cur)), expected)
+
+    signature = f"{login_state}|{','.join(sorted(foreign))}|{expiring}"
+    if signature == ws.get("market_signature"):
+        return []
+    ws["market_signature"] = signature
+
+    out: list[str] = []
+    if login_state == "relogin":
+        out.append(
+            f"ℹ️ <b>{notify.esc(name)}</b>: BOOKFLEA_COOKIE протухла, зайшов паролем. "
+            f"Все працює — але поки не оновите секрет, кожен прогін логінитиметься заново."
+        )
+    if expiring and login_state == "cookie":
+        out.append(
+            f"ℹ️ <b>{notify.esc(name)}</b>: токен у BOOKFLEA_COOKIE спливає "
+            f"{notify.esc(expiring)} (лишилось {max(days_left or 0, 0)} дн.) — час оновити секрет."
+        )
+    if login_state == "fail":
+        out.append(
+            f"⚠️ <b>{notify.esc(name)}</b>: не вдалось авторизуватись на Букфлі "
+            f"({notify.esc(login_note)})."
+        )
+    if foreign:
+        out.append(
+            f"⚠️ <b>{notify.esc(name)}</b>: у видачі валюта "
+            f"{notify.esc(', '.join(sorted(foreign)))} замість {notify.esc(expected)} — "
+            f"сайт показує каталог іншої країни. Потрібен запуск з українського IP."
+        )
+    return out
+
+
 def run(cfg: dict[str, Any], state: dict[str, Any], *, dry_run: bool) -> tuple[list[str], int]:
     defaults = cfg.get("defaults", {}) or {}
     session = olx.build_session()
@@ -127,49 +178,12 @@ def run(cfg: dict[str, Any], state: dict[str, Any], *, dry_run: bool) -> tuple[l
             continue
 
         if source == "bookflea":
-            # Букфлі розділений за країнами і вибирає її за IP клієнта. Якщо в
-            # видачі не та валюта — ми дивимось чужий ринок, і мовчазний нуль
-            # збігів пояснюється саме цим. Попереджаємо, але лише коли стан
-            # змінився: інакше це було б повідомлення кожні пів години.
-            expected = str(opt.get("currency", "UAH")).upper()
-            seen_cur = {str(c).upper() for c in (bookflea.LAST_SCAN.get("currencies") or set())}
-            foreign = seen_cur - {expected}
-            login_state, login_note = bookflea.LOGIN_STATE
-
-            # Токен у BOOKFLEA_COOKIE живе близько місяця. Нагадати за тиждень
-            # дешевше, ніж дізнатись про його смерть із раптової тиші.
-            expires = bookflea.COOKIE_EXPIRES_AT
-            days_left = (expires - datetime.now(timezone.utc)).days if expires else None
-            expiring = expires.date().isoformat() if days_left is not None and days_left <= 7 else ""
-
-            signature = f"{login_state}|{','.join(sorted(foreign))}|{expiring}"
-            if signature != ws.get("market_signature"):
-                if login_state == "relogin":
-                    messages.append(
-                        f"ℹ️ <b>{notify.esc(name)}</b>: BOOKFLEA_COOKIE протухла, зайшов паролем. "
-                        f"Все працює — але поки не оновите секрет, кожен прогін логінитиметься заново."
-                    )
-                if expiring and login_state == "cookie":
-                    messages.append(
-                        f"ℹ️ <b>{notify.esc(name)}</b>: токен у BOOKFLEA_COOKIE спливає "
-                        f"{notify.esc(expiring)} (лишилось {max(days_left or 0, 0)} дн.) — час оновити секрет."
-                    )
-                if login_state == "fail":
-                    messages.append(
-                        f"⚠️ <b>{notify.esc(name)}</b>: не вдалось залогінитись на Букфлі "
-                        f"({notify.esc(login_note)}). Без логіну з-за кордону сайт віддає "
-                        f"каталог іншої країни."
-                    )
-                if foreign:
-                    messages.append(
-                        f"⚠️ <b>{notify.esc(name)}</b>: у видачі валюта "
-                        f"{notify.esc(', '.join(sorted(foreign)))} замість {notify.esc(expected)} — "
-                        f"схоже, сайт показує каталог іншої країни. Перевірте BOOKFLEA_EMAIL / "
-                        f"BOOKFLEA_PASSWORD і країну в профілі Букфлі."
-                    )
-                ws["market_signature"] = signature
-            if foreign:
-                log.warning("  ⚠ валюти у видачі: %s (очікуємо %s)", ", ".join(sorted(seen_cur)), expected)
+            # Діагностика, і тільки. Вона не сміє валити прогін: якщо тут щось
+            # піде не так, ми втратимо ще й результати OLX, зібрані вище.
+            try:
+                messages.extend(bookflea_notes(name, opt, ws))
+            except Exception as exc:  # noqa: BLE001
+                log.warning("  не вдалось зібрати діагностику Букфлі: %s", exc)
 
         # Сканування «найновіших N» бачить лише вікно. Якщо між запусками
         # з нього зникло геть усе, значить за цей час з'явилось понад N
