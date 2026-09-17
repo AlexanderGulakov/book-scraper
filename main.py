@@ -66,6 +66,38 @@ def watch_key(w: dict[str, Any], idx: int) -> str:
     return str(w.get("id") or w.get("name") or f"watch-{idx}")
 
 
+def wanted(w: dict[str, Any], idx: int, only: list[str], skip: list[str]) -> bool:
+    """Чи брати цей watch у цьому запуску (ключі --only / --skip).
+
+    Потрібно, бо Букфлі доводиться питати з українського IP (сайт вибирає
+    каталог за IP клієнта), тож він крутиться окремо на домашній машині, поки
+    OLX лишається в GitHub Actions. Порівнюємо і з `id`, і з `name`, і з
+    `source`, без урахування регістру — щоб `--skip bookflea` теж працювало.
+    """
+    tags = {str(w.get("id") or "").casefold(), str(w.get("name") or "").casefold(),
+            str(w.get("source") or "olx").casefold(), watch_key(w, idx).casefold()}
+    tags.discard("")
+    if only and not (tags & {o.casefold() for o in only}):
+        return False
+    if skip and (tags & {s.casefold() for s in skip}):
+        return False
+    return True
+
+
+def forget_orphans(cfg: dict[str, Any], state: dict[str, Any]) -> list[str]:
+    """Прибирає зі стану watch'і, яких уже немає в конфізі (напр. перейменовані).
+
+    Саме перейменування і є типовим випадком: ключ стану — це `name`, тож
+    «Рональду» → «Роналду» лишає по собі мертвий запис на 40 оголошень.
+    Вимкнені (`enabled: false`) watch'і в конфізі присутні, їхній стан цілий.
+    """
+    live = {watch_key(w, i) for i, w in enumerate(cfg["watches"])}
+    gone = [k for k in state["watches"] if k not in live]
+    for k in gone:
+        del state["watches"][k]
+    return gone
+
+
 def due(watch_state: dict[str, Any], interval_minutes: Any) -> bool:
     """Чи час перевіряти цей watch. Без interval_minutes — щоразу."""
     if not interval_minutes:
@@ -134,7 +166,8 @@ def bookflea_notes(name: str, opt: dict[str, Any], ws: dict[str, Any]) -> list[s
     return out
 
 
-def run(cfg: dict[str, Any], state: dict[str, Any], *, dry_run: bool) -> tuple[list[str], int]:
+def run(cfg: dict[str, Any], state: dict[str, Any], *, dry_run: bool,
+        only: list[str] | None = None, skip: list[str] | None = None) -> tuple[list[str], int]:
     defaults = cfg.get("defaults", {}) or {}
     session = olx.build_session()
     messages: list[str] = []
@@ -143,6 +176,8 @@ def run(cfg: dict[str, Any], state: dict[str, Any], *, dry_run: bool) -> tuple[l
 
     for idx, w in enumerate(cfg["watches"]):
         if w.get("enabled") is False:
+            continue
+        if not wanted(w, idx, only or [], skip or []):
             continue
         key = watch_key(w, idx)
         name = w.get("name") or key
@@ -277,6 +312,10 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", default="watches.yaml", type=Path)
     ap.add_argument("--state", default="state.json", type=Path)
+    ap.add_argument("--only", action="append", default=[], metavar="WATCH",
+                    help="перевіряти лише ці watch'і (ім'я, id або source; можна кілька разів)")
+    ap.add_argument("--skip", action="append", default=[], metavar="WATCH",
+                    help="пропустити ці watch'і — напр. --skip Букфлі у хмарі")
     ap.add_argument("--dry-run", action="store_true", help="нічого не надсилати, лише показати")
     ap.add_argument("--reset", action="store_true", help="забути стан (наступний запуск буде seed)")
     ap.add_argument("-v", "--verbose", action="store_true")
@@ -291,7 +330,17 @@ def main() -> int:
     cfg = load_config(args.config)
     state = {"version": STATE_VERSION, "watches": {}} if args.reset else load_state(args.state)
 
-    messages, errors = run(cfg, state, dry_run=args.dry_run)
+    gone = forget_orphans(cfg, state)
+    if gone:
+        log.info("Прибрав зі стану watch'і, яких уже немає в конфізі: %s", ", ".join(gone))
+
+    selected = [w for i, w in enumerate(cfg["watches"])
+                if w.get("enabled") is not False and wanted(w, i, args.only, args.skip)]
+    if args.only or args.skip:
+        log.info("Цього разу перевіряю %s з %s: %s", len(selected), len(cfg["watches"]),
+                 ", ".join(str(w.get("name") or "?") for w in selected) or "нічого")
+
+    messages, errors = run(cfg, state, dry_run=args.dry_run, only=args.only, skip=args.skip)
 
     channels = notify.build_channels(cfg)
     if messages and not channels:
@@ -306,7 +355,7 @@ def main() -> int:
     log.info("Стан збережено в %s", args.state)
 
     # Не валимо workflow через тимчасову помилку мережі, якщо хоч щось спрацювало.
-    if errors and errors >= len(cfg["watches"]):
+    if errors and errors >= max(len(selected), 1):
         return 1
     return 0
 
