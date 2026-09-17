@@ -12,11 +12,11 @@ import logging
 import random
 import re
 import time
-from dataclasses import dataclass, asdict
 from typing import Any, Iterable
 from urllib.parse import urlparse, parse_qsl, urlencode, urlunparse
 
 from fetcher import Fetcher, describe_block
+from models import Ad
 
 log = logging.getLogger("olx")
 
@@ -26,27 +26,6 @@ _STATE_RE = re.compile(r'window\.__PRERENDERED_STATE__\s*=\s*("(?:[^"\\]|\\.)*")
 
 class OlxError(RuntimeError):
     pass
-
-
-@dataclass
-class Ad:
-    id: str
-    title: str
-    url: str
-    price: float | None          # числове значення або None (безкоштовно / обмін / договірна без суми)
-    currency: str | None
-    price_text: str              # як показує OLX, напр. "1 990 грн."
-    negotiable: bool
-    promoted: bool
-    condition: str | None
-    city: str | None
-    created_time: str | None
-    photo: str | None
-    similar: bool                # True = OLX підмішав це як "схоже", а не точний збіг пошуку
-    reason: str | None           # searchReason: "organic" | "promoted" | ...
-
-    def as_dict(self) -> dict[str, Any]:
-        return asdict(self)
 
 
 def build_session() -> Fetcher:
@@ -126,6 +105,7 @@ def _normalize(a: dict[str, Any]) -> Ad:
         # Перевірка нижче — просто запобіжник на випадок нових значень.
         similar=reason not in (None, "organic", "promoted"),
         reason=reason,
+        source="olx",
     )
 
 

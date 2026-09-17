@@ -20,6 +20,7 @@ from typing import Any
 
 import yaml
 
+import bookflea
 import notify
 import olx
 
@@ -65,6 +66,23 @@ def watch_key(w: dict[str, Any], idx: int) -> str:
     return str(w.get("id") or w.get("name") or f"watch-{idx}")
 
 
+def due(watch_state: dict[str, Any], interval_minutes: Any) -> bool:
+    """Чи час перевіряти цей watch. Без interval_minutes — щоразу."""
+    if not interval_minutes:
+        return True
+    last = watch_state.get("last_run")
+    if not last:
+        return True
+    try:
+        prev = datetime.fromisoformat(last)
+    except ValueError:
+        return True
+    if prev.tzinfo is None:
+        prev = prev.replace(tzinfo=timezone.utc)
+    # Запас у хвилину: розклад GitHub «пливе», і рівно 60.0 хв майже не трапляється.
+    return datetime.now(timezone.utc) - prev >= timedelta(minutes=float(interval_minutes) - 1)
+
+
 def run(cfg: dict[str, Any], state: dict[str, Any], *, dry_run: bool) -> tuple[list[str], int]:
     defaults = cfg.get("defaults", {}) or {}
     session = olx.build_session()
@@ -80,19 +98,50 @@ def run(cfg: dict[str, Any], state: dict[str, Any], *, dry_run: bool) -> tuple[l
         opt = {**defaults, **w}
         # exclude_keywords — єдиний список, який ДОДАЄТЬСЯ до спільного з defaults,
         # а не замінює його: спільний чорний список мерчу + власні слова пошуку.
-        opt["exclude_keywords"] = list(dict.fromkeys(
-            (defaults.get("exclude_keywords") or []) + (w.get("exclude_keywords") or [])
-        ))
+        # Вимкнути спільний список для окремого watch: use_default_excludes: false
+        shared = (defaults.get("exclude_keywords") or []) if opt.get("use_default_excludes", True) else []
+        opt["exclude_keywords"] = list(dict.fromkeys(shared + (w.get("exclude_keywords") or [])))
+
+        ws = state["watches"].setdefault(key, {"seeded": False, "ads": {}})
+
+        if not due(ws, opt.get("interval_minutes")):
+            log.info("▷ %s — пропускаю, ще не час (кожні %s хв)", name, opt.get("interval_minutes"))
+            continue
 
         log.info("▶ %s", name)
+        source = str(opt.get("source", "olx")).lower()
+        window: list[str] = []
         try:
-            ads = olx.fetch_watch(session, w["url"], pages=int(opt.get("pages", 1)))
-        except olx.OlxError as exc:
+            if source == "bookflea":
+                ads, window = bookflea.collect(
+                    session,
+                    list(w.get("keywords") or []),
+                    mode=str(opt.get("mode", "latest")),
+                    page_size=int(opt.get("page_size", 48)),
+                )
+            else:
+                ads = olx.fetch_watch(session, w["url"], pages=int(opt.get("pages", 1)))
+        except (olx.OlxError, bookflea.BookfleaError) as exc:
             log.error("  ✖ %s", exc)
             errors += 1
             continue
 
-        ws = state["watches"].setdefault(key, {"seeded": False, "ads": {}})
+        # Сканування «найновіших N» бачить лише вікно. Якщо між запусками
+        # з нього зникло геть усе, значить за цей час з'явилось понад N
+        # оголошень — щось могло проскочити повз нас непоміченим.
+        prev_window = ws.get("window") or []
+        if window and prev_window and not (set(window) & set(prev_window)):
+            warn = (
+                f"⚠️ <b>{notify.esc(name)}</b>: за час між перевірками змінилась уся стрічка "
+                f"({len(window)} позицій). Можливо, щось пропущено — збільште page_size "
+                f"або перевіряйте частіше."
+            )
+            log.warning("  ⚠ вікно провернулось повністю — можливий пропуск")
+            messages.append(warn)
+        if window:
+            ws["window"] = window
+
+        ws["last_run"] = now
         known: dict[str, Any] = ws["ads"]
         first_run = not ws.get("seeded")
 

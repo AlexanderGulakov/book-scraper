@@ -89,20 +89,34 @@ class Email:
             return False
 
 
+SOURCE_LABEL = {"olx": "OLX", "bookflea": "Букфлі"}
+
+
 def format_event(kind: str, watch_name: str, ad, old_price: float | None = None) -> str:
     """kind: 'new' | 'drop'"""
+    where = SOURCE_LABEL.get(getattr(ad, "source", "olx"), "")
+    tag = f"{esc(watch_name)}"
+    if getattr(ad, "matched", None):
+        tag += f" → «{esc(ad.matched)}»"
+    if where and where.lower() not in watch_name.lower():
+        tag += f" · {where}"
+
     if kind == "drop" and old_price:
         delta = old_price - (ad.price or 0)
         pct = delta / old_price * 100 if old_price else 0
         head = (
-            f"📉 <b>Ціна впала</b> — {esc(watch_name)}\n"
+            f"📉 <b>Ціна впала</b> — {tag}\n"
             f"<s>{esc(_fmt(old_price, ad.currency))}</s> → <b>{esc(ad.price_text)}</b>"
             f"  (−{esc(_fmt(delta, ad.currency))}, −{pct:.0f}%)"
         )
     else:
-        head = f"🆕 <b>Нове оголошення</b> — {esc(watch_name)}\n💰 <b>{esc(ad.price_text)}</b>"
+        head = f"🆕 <b>Нове оголошення</b> — {tag}\n💰 <b>{esc(ad.price_text)}</b>"
 
-    bits = [head, f"\n<a href=\"{esc(ad.url)}\">{esc(ad.title)}</a>"]
+    caption = esc(ad.title)
+    if getattr(ad, "author", None):
+        caption = f"{esc(ad.author)} — {caption}"
+    bits = [head, f"\n<a href=\"{esc(ad.url)}\">{caption}</a>"]
+
     meta = [x for x in (ad.city, ad.condition) if x]
     if ad.negotiable:
         meta.append("торг")
