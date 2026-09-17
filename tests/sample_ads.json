@@ -1,0 +1,86 @@
+{
+  "listing": {
+    "listing": {
+      "pageNumber": 1,
+      "totalElements": 5,
+      "ads": [
+        {
+          "id": 916996334,
+          "title": "Комплект популярних книг на укр мові 8.09.26",
+          "url": "https://www.olx.ua/d/uk/obyavlenie/komplekt-populyarnih-knig-ID103CDs.html",
+          "isPromoted": true,
+          "createdTime": "2026-03-11T20:37:52+02:00",
+          "itemCondition": "Вживане",
+          "price": {
+            "budget": false, "free": false, "exchange": false,
+            "displayValue": "115 000 грн.",
+            "regularPrice": {"value": 115000, "currencyCode": "UAH", "currencySymbol": "грн.", "negotiable": false}
+          },
+          "photos": ["https://ireland.apollo.olxcdn.com/v1/files/mgv06hdq3eng3-UA/image;s=1600x1200"],
+          "location": {"cityName": "Київ", "regionName": "Київська область"},
+          "searchReason": "promoted"
+        },
+        {
+          "id": 932087782,
+          "title": "Айзек Азімов - Фундація, Фундація та імперія (1,2 частина)",
+          "url": "https://www.olx.ua/d/uk/obyavlenie/ayzek-azmov-fundatsya-ID114VBU.html",
+          "isPromoted": false,
+          "createdTime": "2026-08-17T22:36:12+03:00",
+          "itemCondition": "Вживане",
+          "price": {
+            "budget": false, "free": false, "exchange": false,
+            "displayValue": "1 990 грн.",
+            "regularPrice": {"value": 1990, "currencyCode": "UAH", "currencySymbol": "грн.", "negotiable": false}
+          },
+          "photos": ["https://ireland.apollo.olxcdn.com/v1/files/lyhthfrqey232-UA/image;s=1350x1800"],
+          "location": {"cityName": "Запоріжжя", "regionName": "Запорізька область"},
+          "searchReason": "organic"
+        },
+        {
+          "id": 929314548,
+          "title": "Фундація Айзек Азімов Книга",
+          "url": "https://www.olx.ua/d/uk/obyavlenie/fundatsya-ayzek-azmov-kniga-ID10Tjak.html",
+          "isPromoted": false,
+          "createdTime": "2026-07-18T18:01:43+03:00",
+          "itemCondition": "Вживане",
+          "price": {
+            "budget": false, "free": false, "exchange": false,
+            "displayValue": "450 грн.",
+            "regularPrice": {"value": 450, "currencyCode": "UAH", "currencySymbol": "грн.", "negotiable": true}
+          },
+          "photos": ["https://ireland.apollo.olxcdn.com/v1/files/kkbmvp3cvoom-UA/image;s=463x761"],
+          "location": {"cityName": "Бровари", "regionName": "Київська область"},
+          "searchReason": "organic"
+        },
+        {
+          "id": 848280249,
+          "title": "Фундація — КОПІЯ, друк на замовлення",
+          "url": "https://www.olx.ua/d/uk/obyavlenie/kopiya-IDWpirw.html",
+          "isPromoted": false,
+          "createdTime": "2024-05-29T14:20:31+03:00",
+          "itemCondition": "Нове",
+          "price": {
+            "budget": false, "free": false, "exchange": false,
+            "displayValue": "120 грн.",
+            "regularPrice": {"value": 120, "currencyCode": "UAH", "currencySymbol": "грн.", "negotiable": false}
+          },
+          "photos": [],
+          "location": {"cityName": "Київ", "regionName": "Київська область"},
+          "searchReason": "organic"
+        },
+        {
+          "id": 700000001,
+          "title": "Фундація, обмін на іншу фантастику",
+          "url": "https://www.olx.ua/d/uk/obyavlenie/obmin-IDXXXXX.html",
+          "isPromoted": false,
+          "createdTime": "2026-09-01T10:00:00+03:00",
+          "itemCondition": "Вживане",
+          "price": {"budget": false, "free": false, "exchange": true, "displayValue": "Обмін", "regularPrice": null},
+          "photos": [],
+          "location": {"cityName": "Львів", "regionName": "Львівська область"},
+          "searchReason": "organic"
+        }
+      ]
+    }
+  }
+}
