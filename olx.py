@@ -16,19 +16,12 @@ from dataclasses import dataclass, asdict
 from typing import Any, Iterable
 from urllib.parse import urlparse, parse_qsl, urlencode, urlunparse
 
-import requests
+from fetcher import Fetcher, describe_block
 
 log = logging.getLogger("olx")
 
 # window.__PRERENDERED_STATE__ = "...";  (значення — JSON-рядок, тобто JSON усередині JSON)
 _STATE_RE = re.compile(r'window\.__PRERENDERED_STATE__\s*=\s*("(?:[^"\\]|\\.)*")')
-
-_UA_POOL = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
-]
 
 
 class OlxError(RuntimeError):
@@ -56,19 +49,8 @@ class Ad:
         return asdict(self)
 
 
-def build_session() -> requests.Session:
-    s = requests.Session()
-    s.headers.update(
-        {
-            "User-Agent": random.choice(_UA_POOL),
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "uk-UA,uk;q=0.9,en-US;q=0.8,en;q=0.7",
-            "Cache-Control": "no-cache",
-            "Pragma": "no-cache",
-            "Upgrade-Insecure-Requests": "1",
-        }
-    )
-    return s
+def build_session() -> Fetcher:
+    return Fetcher()
 
 
 def with_page(url: str, page: int) -> str:
@@ -80,23 +62,33 @@ def with_page(url: str, page: int) -> str:
     return urlunparse(parts._replace(query=urlencode(q)))
 
 
-def fetch_html(session: requests.Session, url: str, *, timeout: int = 30, retries: int = 3) -> str:
+def fetch_html(session: Fetcher, url: str, *, timeout: int = 30, retries: int = 3) -> str:
     last: Exception | None = None
     for attempt in range(1, retries + 1):
         try:
-            r = session.get(url, timeout=timeout)
-            if r.status_code == 200:
-                return r.text
-            if r.status_code in (403, 429, 503):
-                raise OlxError(f"OLX відповів {r.status_code} (схоже на анти-бот захист)")
-            raise OlxError(f"HTTP {r.status_code}")
+            # Перед першим запитом заходимо на головну — так робить живий браузер,
+            # і саме там видаються кукі, без яких пошук інколи віддає 403.
+            session.warmup()
+            status, body = session.get(url, timeout=timeout, referer=fetcher_home())
+            if status == 200:
+                return body
+            if status in (403, 429, 503):
+                who = describe_block(body)
+                raise OlxError(f"OLX відповів {status} (блокує: {who})")
+            raise OlxError(f"HTTP {status}")
         except Exception as exc:  # noqa: BLE001 - хочемо ретраїти будь-що мережеве
             last = exc
             if attempt < retries:
-                sleep = attempt * 4 + random.uniform(0, 3)
+                session.reset()  # нова сесія = нові кукі, інколи цього досить
+                sleep = attempt * 5 + random.uniform(0, 4)
                 log.warning("Спроба %s/%s не вдалась (%s), повтор через %.1fс", attempt, retries, exc, sleep)
                 time.sleep(sleep)
     raise OlxError(f"Не вдалось завантажити {url}: {last}")
+
+
+def fetcher_home() -> str:
+    from fetcher import HOME
+    return HOME
 
 
 def parse_ads(html: str) -> list[Ad]:
@@ -137,7 +129,7 @@ def _normalize(a: dict[str, Any]) -> Ad:
     )
 
 
-def fetch_watch(session: requests.Session, url: str, pages: int = 1, *, pause: float = 2.0) -> list[Ad]:
+def fetch_watch(session: Fetcher, url: str, pages: int = 1, *, pause: float = 2.0) -> list[Ad]:
     """Повертає унікальні оголошення з перших `pages` сторінок пошуку."""
     seen: dict[str, Ad] = {}
     for page in range(1, max(1, pages) + 1):
