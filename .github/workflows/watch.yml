@@ -2,7 +2,7 @@ name: OLX watch
 
 on:
   schedule:
-    - cron: "*/15 * * * *"
+    - cron: "8,24,39,53 * * * *"
   workflow_dispatch:
     inputs:
       mode:
