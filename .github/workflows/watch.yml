@@ -2,17 +2,18 @@ name: OLX watch
 
 on:
   schedule:
-    # Кожні 15 хвилин. GitHub не гарантує точність — реально буває 15–40 хв.
-    # Мінімально дозволений інтервал — 5 хвилин ('*/5 * * * *').
     - cron: "*/15 * * * *"
   workflow_dispatch:
     inputs:
-      dry_run:
-        description: "Не надсилати сповіщення, лише показати в логах"
-        type: boolean
-        default: false
+      mode:
+        description: "Режим запуску"
+        type: choice
+        default: normal
+        options:
+          - normal
+          - dry-run
+          - probe
 
-# Не даємо двом запускам одночасно писати state.json
 concurrency:
   group: olx-watch
   cancel-in-progress: false
@@ -23,7 +24,7 @@ permissions:
 jobs:
   watch:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
@@ -34,21 +35,22 @@ jobs:
 
       - run: pip install -r requirements.txt
 
+      - name: Probe (діагностика блокування)
+        if: inputs.mode == 'probe'
+        run: python probe.py
+
       - name: Run watcher
+        if: inputs.mode != 'probe'
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          # Необов'язково — якщо хочете ще й e-mail:
-          SMTP_HOST: ${{ secrets.SMTP_HOST }}
-          SMTP_PORT: ${{ secrets.SMTP_PORT }}
-          SMTP_USER: ${{ secrets.SMTP_USER }}
-          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
-          SMTP_TO: ${{ secrets.SMTP_TO }}
+          OLX_BACKEND: ${{ vars.OLX_BACKEND || 'curl_cffi' }}
+          OLX_IMPERSONATE: ${{ vars.OLX_IMPERSONATE || 'chrome131' }}
         run: |
-          python main.py ${{ inputs.dry_run && '--dry-run' || '' }}
+          python main.py ${{ inputs.mode == 'dry-run' && '--dry-run' || '' }}
 
       - name: Commit state
-        if: always()
+        if: always() && inputs.mode != 'probe'
         run: |
           git config user.name  "olx-watcher"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
