@@ -169,6 +169,31 @@ def test_html_escaping():
     assert "<b>Нове оголошення</b>" in msg  # наша власна розмітка лишається
 
 
+def test_exclude_keywords_merge_defaults_and_watch(monkeypatch):
+    """Спільний чорний список з defaults має ДОДАВАТИСЬ до власного, а не зникати."""
+    cfg = {
+        "defaults": {"exclude_keywords": ["фігурк"]},
+        "watches": [{"id": "m", "name": "M", "url": "https://x", "exclude_keywords": ["копія"]}],
+    }
+    state = {"version": 1, "watches": {}}
+
+    data = json.loads(json.dumps(SAMPLE))
+    data["listing"]["listing"]["ads"].append({
+        "id": 555, "title": "Відьмак ФІГУРКА Ґеральта", "url": "https://x/555",
+        "isPromoted": False, "itemCondition": "Нове", "createdTime": "2026-09-17T09:00:00+03:00",
+        "price": {"displayValue": "200 грн.", "regularPrice": {"value": 200, "currencyCode": "UAH"}},
+        "photos": [], "location": {"cityName": "Київ"}, "searchReason": "organic",
+    })
+    payloads = [data]
+    monkeypatch.setattr(app.olx, "fetch_watch", lambda s, u, pages=1, **k: olx.parse_ads(fixture_html(payloads.pop(0))))
+
+    app.run(cfg, state, dry_run=False)
+    seen = state["watches"]["m"]["ads"]
+    assert "555" not in seen, "фігурка з defaults мала відсіятись"
+    assert "848280249" not in seen, "КОПІЯ з власного списку мала відсіятись"
+    assert "932087782" in seen, "звичайна книжка мала лишитись"
+
+
 def test_prune():
     ws = {"ads": {"a": {"seen": "2000-01-01T00:00:00+00:00"}, "b": {"seen": "2999-01-01T00:00:00+00:00"}}}
     assert app.prune(ws, 30) == 1

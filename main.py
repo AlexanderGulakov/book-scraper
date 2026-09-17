@@ -78,6 +78,11 @@ def run(cfg: dict[str, Any], state: dict[str, Any], *, dry_run: bool) -> tuple[l
         key = watch_key(w, idx)
         name = w.get("name") or key
         opt = {**defaults, **w}
+        # exclude_keywords — єдиний список, який ДОДАЄТЬСЯ до спільного з defaults,
+        # а не замінює його: спільний чорний список мерчу + власні слова пошуку.
+        opt["exclude_keywords"] = list(dict.fromkeys(
+            (defaults.get("exclude_keywords") or []) + (w.get("exclude_keywords") or [])
+        ))
 
         log.info("▶ %s", name)
         try:
