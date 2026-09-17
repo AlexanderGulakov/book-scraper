@@ -173,6 +173,10 @@ def run(cfg: dict[str, Any], state: dict[str, Any], *, dry_run: bool,
     messages: list[str] = []
     errors = 0
     now = datetime.now(timezone.utc).isoformat()
+    # Одне оголошення — одне повідомлення за прогін, навіть якщо його бачать
+    # два пошуки (напр. «кассандра клер» і «знаряддя смерті» перетинаються).
+    # У стані кожного watch воно все одно записується окремо.
+    announced: set[str] = set()
 
     for idx, w in enumerate(cfg["watches"]):
         if w.get("enabled") is False:
@@ -256,17 +260,27 @@ def run(cfg: dict[str, Any], state: dict[str, Any], *, dry_run: bool,
         new_cnt = drop_cnt = 0
         for ad in kept:
             prev = known.get(ad.id)
+            # Комплект коштує дорожче за окрему книжку, тож у нього може бути
+            # власна межа: max_price_bundle. Без неї все по-старому.
+            cap = opt.get("max_price")
+            if opt.get("max_price_bundle") is not None and olx.is_bundle(
+                ad,
+                include=opt.get("include_keywords", []) or [],
+                bundle_keywords=opt.get("bundle_keywords", []) or [],
+            ):
+                cap = opt.get("max_price_bundle")
             fits = olx.price_ok(
                 ad,
-                max_price=opt.get("max_price"),
+                max_price=cap,
                 min_price=opt.get("min_price"),
                 currency=opt.get("currency", "UAH"),
                 allow_no_price=bool(opt.get("allow_no_price", False)),
             )
 
             if prev is None:
-                if fits and not first_run:
+                if fits and not first_run and ad.id not in announced:
                     messages.append(notify.format_event("new", name, ad))
+                    announced.add(ad.id)
                     new_cnt += 1
             else:
                 old = prev.get("price")
@@ -277,8 +291,9 @@ def run(cfg: dict[str, Any], state: dict[str, Any], *, dry_run: bool,
                     and ad.price is not None
                     and ad.price < old * (1 - threshold)
                 )
-                if dropped:
+                if dropped and ad.id not in announced:
                     messages.append(notify.format_event("drop", name, ad, old_price=old))
+                    announced.add(ad.id)
                     drop_cnt += 1
 
             known[ad.id] = {

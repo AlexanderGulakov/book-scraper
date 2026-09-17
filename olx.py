@@ -146,6 +146,26 @@ def matches(ad: Ad, *, include: Iterable[str] = (), exclude: Iterable[str] = (),
     return True
 
 
+def is_bundle(ad: Ad, *, include: Iterable[str] = (), bundle_keywords: Iterable[str] = (),
+              min_repeats: int = 2) -> bool:
+    """Схоже, що в оголошенні не одна книжка, а кілька.
+
+    Дві ознаки, обидві по заголовку:
+    1. пряма вказівка — «комплект», «набір», «всі частини»;
+    2. ключове слово повторюється: «Служниця спостерігає, Весілля служниці,
+       Секрет служниці» — три згадки «служниц», отже три книжки. Одна книжка
+       згадує себе один раз.
+
+    Потрібно, бо за комплект люди готові платити більше, ніж за окрему книжку,
+    і одна межа `max_price` на такий watch не працює.
+    """
+    title = (ad.title or "").casefold()
+    if any(w.casefold() in title for w in bundle_keywords if w):
+        return True
+    hits = sum(title.count(w.casefold()) for w in include if w)
+    return hits >= min_repeats
+
+
 def price_ok(ad: Ad, *, max_price: float | None, min_price: float | None,
              currency: str | None, allow_no_price: bool = False) -> bool:
     if ad.price is None:

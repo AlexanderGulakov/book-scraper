@@ -74,17 +74,21 @@ watches:
     url: "https://www.olx.ua/uk/hobbi-otdyh-i-sport/knigi-zhurnaly/q-%D0%B3%D0%B0%D1%80%D1%80%D1%96-%D0%BF%D0%BE%D1%82%D1%82%D0%B5%D1%80/?currency=UAH&search%5Border%5D=created_at%3Adesc"
     max_price: 2000
 
-  # Касандра Клер, цикл «Знаряддя смерті» — потрібні книги 2-6 (перша, «Місто
-  # кісток», уже є). Два пошуки, бо OLX не вважає «Касандра» і «Кассандра» одним
-  # словом, а частина оголошень підписана лише назвою циклу, без прізвища.
-  # Обидва звужені одним і тим самим include_keywords, тож у Telegram летить
-  # лише потрібне; якщо оголошення потрапить в обидва — повідомлення буде одне.
-  - name: "Касандра Клер (Знаряддя смерті)"
-    url: "https://www.olx.ua/uk/hobbi-otdyh-i-sport/knigi-zhurnaly/q-%D0%BA%D0%B0%D1%81%D1%81%D0%B0%D0%BD%D0%B4%D1%80%D0%B0-%D0%BA%D0%BB%D0%B5%D1%80/?currency=UAH&search%5Border%5D=created_at%3Adesc"
-    max_price: 3000        # комплекти всієї серії коштують 1700-2900
-    exclude_keywords: &clare_noise
-      - "едгар"            # «Три знаряддя смерті» Честертона у збірці По
-      - "честертон"
+  # ── Касандра Клер, цикл «Знаряддя смерті» ────────────────────────────────
+  # Потрібні книги 2-6 (перша, «Місто кісток», уже є).
+  #
+  # Чому аж стільки пошуків. OLX шукає майже дослівно: оголошення «Місто
+  # Кісток книга» не знаходиться ні за «кассандра клер», ні за «знаряддя
+  # смерті» — у назві немає ні того, ні того. Перевірено 2026-09-17. Тому на
+  # кожну книжку окремий запит, плюс два «збиральні» — на цикл і на авторку,
+  # вони ловлять комплекти. Дублікати не страшні: одне оголошення = одне
+  # повідомлення за прогін, навіть якщо його бачать кілька пошуків.
+  #
+  # OLX не вважає «Касандра» і «Кассандра» одним словом, але варіант із двома
+  # «с» ширший (98 оголошень проти 22) і містить обидва написання в тексті.
+  - name: "Клер: Місто попелу"
+    url: "https://www.olx.ua/uk/hobbi-otdyh-i-sport/knigi-zhurnaly/q-%D0%BC%D1%96%D1%81%D1%82%D0%BE-%D0%BF%D0%BE%D0%BF%D0%B5%D0%BB%D1%83/?currency=UAH&search%5Border%5D=created_at%3Adesc"
+    max_price: &clare_max 3000        # комплекти всієї серії коштують 1700-2900
     include_keywords: &clare_books
       - "місто попелу"        # City of Ashes, кн. 2
       - "місто скла"          # City of Glass, кн. 3
@@ -98,12 +102,62 @@ watches:
       - "city of fallen"
       - "city of lost"
       - "city of heavenly"
+    exclude_keywords: &clare_noise
+      - "едгар"               # збірка По з оповіданням «Три знаряддя смерті»
+      - "честертон"
+      - "лімб"                # «Лімб. Місто загублених душ» — інша книжка
 
-  - name: "Знаряддя смерті (цикл)"
-    url: "https://www.olx.ua/uk/hobbi-otdyh-i-sport/knigi-zhurnaly/q-%D0%B7%D0%BD%D0%B0%D1%80%D1%8F%D0%B4%D0%B4%D1%8F-%D1%81%D0%BC%D0%B5%D1%80%D1%82%D1%96/?currency=UAH&search%5Border%5D=created_at%3Adesc"
-    max_price: 3000
+  - name: "Клер: Місто скла"
+    url: "https://www.olx.ua/uk/hobbi-otdyh-i-sport/knigi-zhurnaly/q-%D0%BC%D1%96%D1%81%D1%82%D0%BE-%D1%81%D0%BA%D0%BB%D0%B0/?currency=UAH&search%5Border%5D=created_at%3Adesc"
+    max_price: *clare_max
     include_keywords: *clare_books
     exclude_keywords: *clare_noise
+
+  - name: "Клер: Місто впалих янголів"
+    url: "https://www.olx.ua/uk/hobbi-otdyh-i-sport/knigi-zhurnaly/q-%D0%BC%D1%96%D1%81%D1%82%D0%BE-%D0%B2%D0%BF%D0%B0%D0%BB%D0%B8%D1%85-%D1%8F%D0%BD%D0%B3%D0%BE%D0%BB%D1%96%D0%B2/?currency=UAH&search%5Border%5D=created_at%3Adesc"
+    max_price: *clare_max
+    include_keywords: *clare_books
+    exclude_keywords: *clare_noise
+
+  - name: "Клер: Місто загублених душ"
+    url: "https://www.olx.ua/uk/hobbi-otdyh-i-sport/knigi-zhurnaly/q-%D0%BC%D1%96%D1%81%D1%82%D0%BE-%D0%B7%D0%B0%D0%B3%D1%83%D0%B1%D0%BB%D0%B5%D0%BD%D0%B8%D1%85-%D0%B4%D1%83%D1%88/?currency=UAH&search%5Border%5D=created_at%3Adesc"
+    max_price: *clare_max
+    include_keywords: *clare_books
+    exclude_keywords: *clare_noise
+
+  - name: "Клер: Місто небесного вогню"
+    url: "https://www.olx.ua/uk/hobbi-otdyh-i-sport/knigi-zhurnaly/q-%D0%BC%D1%96%D1%81%D1%82%D0%BE-%D0%BD%D0%B5%D0%B1%D0%B5%D1%81%D0%BD%D0%BE%D0%B3%D0%BE-%D0%B2%D0%BE%D0%B3%D0%BD%D1%8E/?currency=UAH&search%5Border%5D=created_at%3Adesc"
+    max_price: *clare_max
+    include_keywords: *clare_books
+    exclude_keywords: *clare_noise
+
+  - name: "Клер: Знаряддя смерті (цикл)"
+    url: "https://www.olx.ua/uk/hobbi-otdyh-i-sport/knigi-zhurnaly/q-%D0%B7%D0%BD%D0%B0%D1%80%D1%8F%D0%B4%D0%B4%D1%8F-%D1%81%D0%BC%D0%B5%D1%80%D1%82%D1%96/?currency=UAH&search%5Border%5D=created_at%3Adesc"
+    max_price: *clare_max
+    include_keywords: *clare_books
+    exclude_keywords: *clare_noise
+
+  - name: "Клер: за авторкою"
+    url: "https://www.olx.ua/uk/hobbi-otdyh-i-sport/knigi-zhurnaly/q-%D0%BA%D0%B0%D1%81%D1%81%D0%B0%D0%BD%D0%B4%D1%80%D0%B0-%D0%BA%D0%BB%D0%B5%D1%80/?currency=UAH&search%5Border%5D=created_at%3Adesc"
+    max_price: *clare_max
+    include_keywords: *clare_books
+    exclude_keywords: *clare_noise
+
+  # «Служниця» Фріди Мак-Фадден і продовження: «Служниця спостерігає»,
+  # «Секрет служниці», «Весілля служниці». Інші її книжки («Ніколи не бреши»,
+  # «Колега», «В'язень») не цікавлять, тому шукаємо за словом, а не за авторкою.
+  #
+  # Дві межі ціни: окрема книжка — до 199 грн, комплект — до 700. Комплект
+  # розпізнається або за словом («комплект», «набір»), або за тим, що «служниц»
+  # у заголовку повторюється: «Служниця спостерігає, Весілля служниці, Секрет
+  # служниці» — три згадки, отже три книжки.
+  - name: "Служниця (Мак-Фадден)"
+    url: "https://www.olx.ua/uk/hobbi-otdyh-i-sport/knigi-zhurnaly/q-%D1%81%D0%BB%D1%83%D0%B6%D0%BD%D0%B8%D1%86%D1%8F/?currency=UAH&search%5Border%5D=created_at%3Adesc"
+    include_keywords: ["служниц"]
+    max_price: 199              # окрема книжка
+    max_price_bundle: 700       # комплект
+    bundle_keywords: ["комплект", "набір", "всі частини", "усі частини",
+                      "книги", "2 книги", "3 книги", "дві книги", "три книги"]
 
   # 27 з 40 було не по темі: довідник механізатора, залізобетонні конструкції
   # і норії НК-50 (бо «бункер» — ще й деталь зернової техніки).

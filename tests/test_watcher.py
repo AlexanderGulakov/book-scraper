@@ -237,3 +237,76 @@ def test_forget_orphans_drops_renamed_watches():
 
     assert app.forget_orphans(cfg, state) == ["Рональду"]
     assert set(state["watches"]) == {"Роналду", "Вимкнений"}, "вимкнений watch стан зберігає"
+
+
+def test_same_ad_is_announced_once_per_run(monkeypatch):
+    """Два пошуки можуть бачити те саме оголошення — повідомлення має бути одне."""
+    import main as app
+    import olx
+    from models import Ad
+
+    ad = Ad(id="42", title="Місто попелу. Книга 2", url="u", price=300,
+            currency="UAH", price_text="300 грн")
+    monkeypatch.setattr(app.olx, "build_session", lambda: None)
+    monkeypatch.setattr(olx, "fetch_watch", lambda *a, **k: [ad])
+    monkeypatch.setattr(app.time, "sleep", lambda *_: None)   # без пауз між watch'ами
+
+    cfg = {"defaults": {}, "watches": [
+        {"name": "Касандра Клер", "url": "u1", "max_price": 2000},
+        {"name": "Знаряддя смерті", "url": "u2", "max_price": 2000},
+    ]}
+    state = {"version": 1, "watches": {}}
+
+    app.run(cfg, state, dry_run=False)                  # seed обох
+    ad.price = 200                                      # подешевшало
+    msgs, _ = app.run(cfg, state, dry_run=False)
+
+    assert len(msgs) == 1, f"мало прилетіти одне повідомлення, а не {len(msgs)}"
+    # у стані обох watch'ів оголошення все одно записане з новою ціною
+    assert state["watches"]["Касандра Клер"]["ads"]["42"]["price"] == 200
+    assert state["watches"]["Знаряддя смерті"]["ads"]["42"]["price"] == 200
+
+
+def test_bundle_gets_its_own_price_cap(monkeypatch):
+    """Окрема книжка до 199, комплект до 700 — в одному watch'і."""
+    import main as app
+    import olx
+    from models import Ad
+
+    def ad(i, title, price):
+        return Ad(id=str(i), title=title, url="u", price=price, currency="UAH", price_text="")
+
+    ads = [
+        ad(1, "Книга «Служниця» Фріда Мак-Фадден", 180),                       # ✔ окрема, дешева
+        ad(2, "Книга \"Служниця\" Фріди Мак-Фадден", 350),                      # ✖ окрема, дорога
+        ad(3, "Служниця спостерігає, Весілля служниці, Секрет служниці", 650),  # ✔ комплект (3 згадки)
+        ad(4, "книги Служниця всі частини, Фріда Мак Фадден", 1250),            # ✖ комплект, дорогий
+        ad(5, "Комплект книг Служниця", 690),                                   # ✔ комплект за словом
+    ]
+    monkeypatch.setattr(app.olx, "build_session", lambda: None)
+    monkeypatch.setattr(olx, "fetch_watch", lambda *a, **k: ads)
+    monkeypatch.setattr(app.time, "sleep", lambda *_: None)
+
+    cfg = {"defaults": {}, "watches": [{
+        "name": "Служниця", "url": "u", "include_keywords": ["служниц"],
+        "max_price": 199, "max_price_bundle": 700,
+        "bundle_keywords": ["комплект", "набір", "всі частини"],
+    }]}
+    state = {"version": 1, "watches": {"Служниця": {"seeded": True, "ads": {}}}}
+
+    msgs, _ = app.run(cfg, state, dry_run=False)
+    got = {a.id for a in ads if any(a.title[:25] in m for m in msgs)}
+    assert got == {"1", "3", "5"}, f"очікував 1,3,5; отримав {sorted(got)}"
+
+
+def test_is_bundle_does_not_confuse_one_book_with_a_set():
+    import olx
+    from models import Ad
+
+    single = Ad(id="1", title="Служниця спостерігає Фріда Мак-Фадден", url="u",
+                price=225, currency="UAH", price_text="")
+    assert olx.is_bundle(single, include=["служниц"]) is False, "одна згадка — одна книжка"
+
+    pair = Ad(id="2", title="Служниця, Секрет служниці", url="u",
+              price=450, currency="UAH", price_text="")
+    assert olx.is_bundle(pair, include=["служниц"]) is True
