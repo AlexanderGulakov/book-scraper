@@ -204,32 +204,63 @@ python -m pytest -q         # тести
 
 | де | команда |
 |---|---|
-| GitHub Actions | `python main.py --skip Букфлі` |
-| ваш ПК | `python main.py --only Букфлі --state state.local.json` |
+| GitHub Actions | `python main.py --skip bookflea` |
+| ваш ПК | `run-bookflea.bat` (усередині `--only bookflea --state state.local.json`) |
+
+`bookflea` — це значення `source`, тому ключі пишуться латиницею: кирилиця в
+аргументах Планувальника й у YAML воркфлоу легко ламається на кодуваннях.
 
 **`--state state.local.json` обов'язковий.** Інакше вийде два писачі в один
 `state.json`: хмара пушить свою версію, домашній прогін пише свою, і вони
 затирають одне одного. З окремим файлом перетину немає — у хмарі стан OLX, у
-вас стан Букфлі.
+вас стан Букфлі. Обидва (`state.local.json`, `logs/`) — у `.gitignore`.
 
-Разова підготовка на ПК:
+Логін тут **не потрібен**: з українського IP сайт і так віддає український
+каталог. `BOOKFLEA_COOKIE` та пароль потрібні були лише для спроби обійти
+географію з хмари.
+
+#### Разово
 
 ```
-pip install -r requirements.txt
+py -3 -m pip install -r requirements.txt
 setx TELEGRAM_BOT_TOKEN "8123456789:AAH..."
 setx TELEGRAM_CHAT_ID  "123456789"
-setx BOOKFLEA_COOKIE   "<значення accessToken>"
 ```
 
-Саме завдання (кожні 30 хвилин):
+`setx` діє лише для нових процесів — закрийте це вікно й відкрийте нове.
+Перевірка, що все зібралось (нічого не надсилає):
 
 ```
-schtasks /create /tn "Bookflea watcher" /sc minute /mo 30 ^
-  /tr "\"C:\Python312\python.exe\" C:\Users\<ви>\Projects\olx-watcher\main.py --only Букфлі --state state.local.json"
+py -3 main.py --only bookflea --state state.local.json --dry-run
 ```
 
-Перший прогін мовчазний — він лише запам'ятовує те, що вже висить. Перевірити,
-що все зібралось, можна одразу: `python main.py --only Букфлі --state state.local.json --dry-run`.
+Створення завдання (кожні 30 хвилин, від імені поточного користувача):
+
+```
+schtasks /Create /TN "Bookflea watcher" /SC MINUTE /MO 30 ^
+  /TR "C:\Users\<ви>\Projects\olx-watcher\run-bookflea.bat"
+```
+
+Перший справжній прогін мовчазний — він лише запам'ятовує те, що вже висить.
+
+#### Щодня
+
+Нічого. Завдання спрацьовує саме, поки комп'ютер увімкнений і ви залогінені.
+Якщо хочете вмикати вручну — `bookflea-on.bat` і `bookflea-off.bat` (подвійний
+клік). `bookflea-off.bat` ще й перериває прогін, якщо він саме йде.
+
+Те саме командою:
+
+```
+schtasks /Change /TN "Bookflea watcher" /ENABLE
+schtasks /Change /TN "Bookflea watcher" /DISABLE
+schtasks /Run    /TN "Bookflea watcher"      :: прогнати негайно, поза розкладом
+schtasks /Query  /TN "Bookflea watcher" /V /FO LIST | findstr /C:"Status" /C:"Last Run"
+schtasks /Delete /TN "Bookflea watcher" /F   :: прибрати зовсім
+```
+
+Що відбувалось — у `logs\bookflea.log`. Стан не губиться: після вимкнення й
+увімкнення бот продовжує з того самого місця, повторів у Telegram не буде.
 
 Той самий підхід годиться, якщо OLX колись почне різати запити з дата-центрів:
 тоді вдома крутиться вже все, без `--only`.

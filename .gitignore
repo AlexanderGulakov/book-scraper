@@ -5,3 +5,5 @@ venv/
 .env
 *.html
 !tests/*.html
+state.local.json
+logs/
