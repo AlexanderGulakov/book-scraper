@@ -180,3 +180,47 @@ def price_ok(ad: Ad, *, max_price: float | None, min_price: float | None,
     if min_price is not None and ad.price < min_price:
         return False
     return True
+
+
+# ------------------------------------------------------- чи оголошення ще живе
+
+def ad_state(session: Fetcher, url: str, *, timeout: int = 20) -> str:
+    """'alive' | 'gone' | 'unknown' — чи висить ще це оголошення на OLX.
+
+    Навіщо. Зникнення з першої сторінки пошуку НЕ означає продаж: свіжі
+    оголошення просто виштовхують старі вниз. Єдиний надійний спосіб —
+    спитати саму сторінку оголошення. Перевірено 2026-09-19:
+
+        живе     → HTTP 200, у __PRERENDERED_STATE__ ad.status == "active"
+        знятe    → HTTP 410 Gone
+        не було  → HTTP 404
+
+    Текст сторінки для цього не годиться: слова «видалено», «404», «сторінку
+    не знайдено» лежать у локалізаційному бандлі й присутні навіть на живій
+    сторінці.
+    """
+    try:
+        status, body = session.get(url, timeout=timeout)
+    except Exception as exc:  # noqa: BLE001
+        log.debug("Не вдалось перевірити %s: %s", url, exc)
+        return "unknown"
+
+    if status in (404, 410):
+        return "gone"
+    if status != 200:
+        return "unknown"
+
+    # 200 буває і в знятого оголошення, якщо OLX вирішив показати заглушку,
+    # тому дивимось ще й на сам статус у даних сторінки.
+    m = _STATE_RE.search(body)
+    if not m:
+        return "unknown"
+    try:
+        data = json.loads(json.loads(m.group(1)))
+    except ValueError:
+        return "unknown"
+    ad = (data.get("ad") or {}).get("ad") or data.get("ad") or {}
+    status_field = ad.get("status")
+    if status_field is None and not ad.get("title"):
+        return "unknown"
+    return "alive" if status_field in (None, "active") else "gone"

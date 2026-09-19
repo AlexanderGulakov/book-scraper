@@ -310,3 +310,74 @@ def test_is_bundle_does_not_confuse_one_book_with_a_set():
     pair = Ad(id="2", title="Служниця, Секрет служниці", url="u",
               price=450, currency="UAH", price_text="")
     assert olx.is_bundle(pair, include=["служниц"]) is True
+
+
+# ---------------------------------------------------- звіт про зняті оголошення
+
+def test_ad_state_reads_http_code_not_page_text():
+    """410 — оголошення зняли; 200 + status:active — висить. Текст сторінки бреше:
+    слова «видалено» і «404» є в локалізації навіть на живій сторінці."""
+    import olx
+
+    live_body = ('<script>window.__PRERENDERED_STATE__ = "{\\"ad\\":{\\"ad\\":'
+                 '{\\"status\\":\\"active\\",\\"title\\":\\"Книга\\"}}}";</script>'
+                 ' видалено 404 сторінку не знайдено')
+    removed_body = ('<script>window.__PRERENDERED_STATE__ = "{\\"ad\\":{\\"ad\\":'
+                    '{\\"status\\":\\"removed_by_user\\",\\"title\\":\\"Книга\\"}}}";</script>')
+
+    class S:
+        def __init__(self, status, body=""): self.status, self.body = status, body
+        def get(self, url, **kw): return self.status, self.body
+
+    assert olx.ad_state(S(200, live_body), "u") == "alive"
+    assert olx.ad_state(S(410), "u") == "gone"
+    assert olx.ad_state(S(404), "u") == "gone"
+    assert olx.ad_state(S(200, removed_body), "u") == "gone"
+    assert olx.ad_state(S(503), "u") == "unknown"
+    assert olx.ad_state(S(200, "щось геть інше"), "u") == "unknown"
+
+
+def test_missing_from_page_one_is_not_a_sale(monkeypatch):
+    """Оголошення злетіло з першої сторінки, але живе — у звіт не потрапляє."""
+    import main as app, olx
+    from models import Ad
+
+    state = {"version": 1, "watches": {"w": {"seeded": True, "ads": {
+        "1": {"price": 200, "title": "Живе", "url": "https://www.olx.ua/d/1", "miss": "2026-09-19T10:00:00+00:00"},
+        "2": {"price": 300, "title": "Зняте", "url": "https://www.olx.ua/d/2", "miss": "2026-09-19T09:00:00+00:00",
+              "created": "2026-09-05T09:00:00+00:00"},
+    }}}}
+    cfg = {"watches": [{"id": "w", "name": "Пошук"}]}
+    monkeypatch.setattr(olx, "ad_state", lambda s, url, **k: "alive" if url.endswith("1") else "gone")
+    monkeypatch.setattr(app.time, "sleep", lambda *_: None)
+
+    msgs = app.sold_report(cfg, state, None, max_checks=10)
+
+    assert len(msgs) == 1 and "Зняте" in msgs[0] and "Живе" not in msgs[0]
+    ads = state["watches"]["w"]["ads"]
+    assert "2" not in ads, "зняте прибрали зі стану"
+    assert "miss" not in ads["1"], "живому скинули позначку"
+    assert len(state["sold"]) == 1
+    assert 13 <= state["sold"][0]["days"] <= 15, "пролежало близько двох тижнів"
+
+
+def test_report_shows_price_and_lifetime(monkeypatch):
+    import main as app, olx
+
+    def rec(price, created):
+        return {"price": price, "title": f"Книга за {price}", "url": "https://www.olx.ua/d/x",
+                "miss": "2026-09-19T09:00:00+00:00", "created": created, "cur": "UAH"}
+
+    state = {"version": 1, "watches": {"w": {"seeded": True, "ads": {
+        "1": rec(150, "2026-09-18T12:00:00+00:00"),      # добу
+        "2": rec(300, "2026-09-12T12:00:00+00:00"),      # тиждень
+        "3": rec(900, "2026-08-01T12:00:00+00:00"),      # понад 30 днів
+    }}}}
+    cfg = {"watches": [{"id": "w", "name": "Пошук"}]}
+    monkeypatch.setattr(olx, "ad_state", lambda *a, **k: "gone")
+    monkeypatch.setattr(app.time, "sleep", lambda *_: None)
+
+    text = app.sold_report(cfg, state, None)[0]
+    assert "Медіана: <b>300 грн</b>" in text
+    assert "⏳" in text, "довгожителя позначили — це міг бути не продаж"
+    assert "150 UAH" in text and "дн." in text

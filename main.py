@@ -166,6 +166,115 @@ def bookflea_notes(name: str, opt: dict[str, Any], ws: dict[str, Any]) -> list[s
     return out
 
 
+def _age_days(rec: dict[str, Any], gone_at: datetime) -> float | None:
+    """Скільки днів оголошення провисіло. None, якщо дату створення не знаємо."""
+    raw = rec.get("created") or rec.get("first")
+    if not raw:
+        return None
+    try:
+        born = datetime.fromisoformat(str(raw))
+    except ValueError:
+        return None
+    if born.tzinfo is None:
+        born = born.replace(tzinfo=timezone.utc)
+    return max((gone_at - born).total_seconds() / 86400, 0)
+
+
+def _days_text(days: float | None) -> str:
+    if days is None:
+        return "невідомо скільки"
+    if days < 1:
+        return f"{round(days * 24)} год"
+    return f"{days:.0f} дн."
+
+
+def sold_report(cfg: dict[str, Any], state: dict[str, Any], session: Any,
+                *, max_checks: int = 30, pause: float = 1.5) -> list[str]:
+    """Перевіряє зниклі оголошення і звітує про ті, яких уже немає на сайті.
+
+    Навіщо. Зняте оголошення — найкращий доступний сигнал «за цю ціну беруть».
+    OLX не каже «продано», тому працюємо від протилежного: оголошення, яке
+    зникло з видачі, перевіряємо за його власним посиланням (див.
+    `olx.ad_state`). HTTP 410 означає, що його зняли.
+
+    ⚠ Зняли ≠ продали: продавець міг і передумати, а через ~30 днів OLX сам
+    архівує неоновлені оголошення. Тому в звіті довгожителі позначені окремо.
+
+    Повертає повідомлення для Telegram; історію додає в state["sold"], щоб
+    згодом було на чому рахувати статистику.
+    """
+    now_dt = datetime.now(timezone.utc)
+    names = {watch_key(w, i): (w.get("name") or watch_key(w, i))
+             for i, w in enumerate(cfg["watches"])}
+
+    # Кандидати: зниклі, найдавніше зниклі — першими.
+    candidates: list[tuple[str, str, dict[str, Any]]] = []
+    for key, ws in state["watches"].items():
+        for ad_id, rec in (ws.get("ads") or {}).items():
+            if rec.get("miss") and str(rec.get("url") or "").find("olx.ua") >= 0:
+                candidates.append((key, ad_id, rec))
+    candidates.sort(key=lambda c: str(c[2].get("miss")))
+
+    if not candidates:
+        log.info("Звіт про зняті: перевіряти нема чого")
+        return []
+
+    log.info("Звіт про зняті: кандидатів %s, перевіряю до %s", len(candidates), max_checks)
+
+    sold: list[dict[str, Any]] = []
+    checked = 0
+    for key, ad_id, rec in candidates[:max_checks]:
+        verdict = olx.ad_state(session, rec["url"])
+        checked += 1
+        if verdict == "alive":
+            rec.pop("miss", None)          # просто злетіло з першої сторінки
+        elif verdict == "gone":
+            days = _age_days(rec, now_dt)
+            sold.append({
+                "id": ad_id, "watch": names.get(key, key), "title": rec.get("title"),
+                "price": rec.get("price"), "cur": rec.get("cur"),
+                "url": rec.get("url"), "days": None if days is None else round(days, 1),
+                "gone": now_dt.isoformat(),
+            })
+            state["watches"][key]["ads"].pop(ad_id, None)
+        time.sleep(pause + random.uniform(0, 1))
+
+    log.info("Звіт про зняті: перевірено %s, знято %s", checked, len(sold))
+    if not sold:
+        return []
+
+    history = state.setdefault("sold", [])
+    history.extend(sold)
+    del history[:-1000]                    # історія не росте вічно
+
+    by_watch: dict[str, list[dict[str, Any]]] = {}
+    for s in sold:
+        by_watch.setdefault(s["watch"], []).append(s)
+
+    lines = [f"🧾 <b>Зняті з продажу за годину</b> — {len(sold)} шт."]
+    for watch, items in by_watch.items():
+        lines.append(f"\n<b>{notify.esc(watch)}</b>")
+        for s in sorted(items, key=lambda x: x["price"] if x["price"] is not None else 1e9):
+            price = f"{s['price']:.0f} {s['cur'] or ''}".strip() if s["price"] is not None else "без ціни"
+            title = notify.esc(str(s["title"] or "")[:70])
+            link = f"<a href=\"{notify.esc(s['url'])}\">{title}</a>" if s.get("url") else title
+            mark = " ⏳" if (s["days"] or 0) >= 30 else ""
+            lines.append(f"• {notify.esc(price)} · {_days_text(s['days'])}{mark} — {link}")
+
+    priced = sorted(s["price"] for s in sold if s["price"] is not None)
+    if priced:
+        mid = priced[len(priced) // 2]
+        lines.append(f"\nМедіана: <b>{mid:.0f} грн</b> (від {priced[0]:.0f} до {priced[-1]:.0f})")
+    aged = sorted(s["days"] for s in sold if s["days"] is not None)
+    if aged:
+        lines.append(f"Провисіли: медіана {_days_text(aged[len(aged) // 2])}, "
+                     f"від {_days_text(aged[0])} до {_days_text(aged[-1])}")
+    if any((s["days"] or 0) >= 30 for s in sold):
+        lines.append("⏳ — висіло понад 30 днів: можливо, не продаж, а закінчився термін.")
+
+    return ["\n".join(lines)]
+
+
 def run(cfg: dict[str, Any], state: dict[str, Any], *, dry_run: bool,
         only: list[str] | None = None, skip: list[str] | None = None) -> tuple[list[str], int]:
     defaults = cfg.get("defaults", {}) or {}
@@ -296,12 +405,28 @@ def run(cfg: dict[str, Any], state: dict[str, Any], *, dry_run: bool,
                     announced.add(ad.id)
                     drop_cnt += 1
 
+            prev = prev or {}
             known[ad.id] = {
                 "price": ad.price,
                 "cur": ad.currency,
                 "title": ad.title[:120],
                 "seen": now,
+                # Для звіту про зняті оголошення: за посиланням ми потім
+                # питаємо, чи воно ще живе, а дати дають «скільки пролежало».
+                "url": ad.url or prev.get("url"),
+                "created": ad.created_time or prev.get("created"),
+                "first": prev.get("first") or now,
             }
+
+        # Позначаємо, чого цього разу в видачі не було. Зникнення з першої
+        # сторінки ще нічого не означає — свіжі оголошення виштовхують старі, —
+        # тому це лише кандидати на перевірку, яку робить sold_report().
+        present = {a.id for a in ads} | set(window)
+        for ad_id, rec in known.items():
+            if ad_id in present:
+                rec.pop("miss", None)
+            elif "miss" not in rec:
+                rec["miss"] = now
 
         if first_run:
             ws["seeded"] = True
@@ -315,6 +440,19 @@ def run(cfg: dict[str, Any], state: dict[str, Any], *, dry_run: bool,
 
         if idx + 1 < len(cfg["watches"]):
             time.sleep(float(defaults.get("pause_between_watches", 3)) + random.uniform(0, 2))
+
+    # Раз на годину — звіт про зняті оголошення. У dry-run не чіпаємо: він
+    # видаляє записи зі стану, а «показати й нічого не змінити» тут не вийде.
+    every = defaults.get("sold_report_minutes", 60)
+    if every and not dry_run and due({"last_run": state.get("sold_report_last")}, every):
+        try:
+            messages.extend(sold_report(
+                cfg, state, session,
+                max_checks=int(defaults.get("sold_report_max_checks", 30)),
+            ))
+            state["sold_report_last"] = now
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Звіт про зняті не склався: %s", exc)
 
     if dry_run and messages:
         log.info("--dry-run: %s повідомлень НЕ надіслано:\n%s", len(messages), "\n---\n".join(messages))
