@@ -28,6 +28,38 @@ log = logging.getLogger("main")
 STATE_VERSION = 1
 
 
+def load_env(path: Path | None = None) -> list[str]:
+    """Підтягує секрети з `.env` поруч зі скриптом. Повертає імена ключів.
+
+    Навіщо окремий файл. Секрети не можна класти ні у `watches.yaml`, ні в
+    `run-bookflea.bat` — репозиторій публічний. Змінні середовища Windows
+    працюють, але Планувальник підхоплює нові лише після перелогіну, а
+    `py main.py --test-notify` хочеться запустити одразу. `.env` читається
+    обома способами запуску й уже стоїть у `.gitignore`.
+
+    Уже задані змінні НЕ перезаписуються: у GitHub Actions секрети приходять
+    із середовища й мають лишатись головнішими за випадковий файл у клоні.
+    """
+    path = path or Path(__file__).with_name(".env")
+    if not path.exists():
+        return []
+    loaded: list[str] = []
+    for raw in path.read_text(encoding="utf-8-sig").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip().removeprefix("set ").strip()
+        # Лапки й пробіли зрізаємо тут-таки: саме через них Telegram місяцями
+        # відповідав 400 chat not found на локальній машині.
+        value = value.strip().strip('"').strip("'").strip()
+        if not key:
+            continue
+        os.environ.setdefault(key, value)
+        loaded.append(key)
+    return loaded
+
+
 def load_config(path: Path) -> dict[str, Any]:
     with path.open(encoding="utf-8") as f:
         cfg = yaml.safe_load(f) or {}
@@ -500,6 +532,8 @@ def main() -> int:
                     help="пропустити ці watch'і — напр. --skip Букфлі у хмарі")
     ap.add_argument("--dry-run", action="store_true", help="нічого не надсилати, лише показати")
     ap.add_argument("--reset", action="store_true", help="забути стан (наступний запуск буде seed)")
+    ap.add_argument("--test-notify", action="store_true",
+                    help="надіслати тестове повідомлення в канали й вийти (нічого не сканує)")
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()
 
@@ -509,7 +543,28 @@ def main() -> int:
         datefmt="%H:%M:%S",
     )
 
+    from_env_file = load_env()
+    if from_env_file:
+        # Лише імена — значення в лог не потрапляють ніколи.
+        log.info(".env: підхопив %s", ", ".join(from_env_file))
+
     cfg = load_config(args.config)
+
+    if args.test_notify:
+        channels = notify.build_channels(cfg)
+        if not channels:
+            log.error("Жодного каналу. Перевірте TELEGRAM_BOT_TOKEN і TELEGRAM_CHAT_ID "
+                      "у змінних середовища ЦЬОГО користувача.")
+            return 1
+        if notify.dispatch(channels, [notify.format_test()]):
+            log.error("Тест не дійшов. Як читати відповідь Telegram вище: "
+                      "400 chat not found → хибний TELEGRAM_CHAT_ID (або бот не в тому чаті); "
+                      "401 Unauthorized → хибний TELEGRAM_BOT_TOKEN; "
+                      "403 bot was blocked → бота заблоковано в чаті.")
+            return 1
+        log.info("✔ Тестове повідомлення надіслано — канал працює")
+        return 0
+
     state = {"version": STATE_VERSION, "watches": {}} if args.reset else load_state(args.state)
 
     gone = forget_orphans(cfg, state)
@@ -525,16 +580,28 @@ def main() -> int:
     messages, errors = run(cfg, state, dry_run=args.dry_run, only=args.only, skip=args.skip)
 
     channels = notify.build_channels(cfg)
+    undelivered = 0
     if messages and not channels:
         log.error("Є %s подій, але жодного налаштованого каналу сповіщень!", len(messages))
         errors += 1
+        undelivered = len(messages)
     else:
-        notify.dispatch(channels, messages)
-        if messages:
+        undelivered = notify.dispatch(channels, messages)
+        if messages and undelivered:
+            log.error("НЕ доставлено %s повідомлень — див. відповідь Telegram/SMTP вище", undelivered)
+            errors += 1
+        elif messages:
             log.info("Надіслано %s сповіщень", len(messages))
 
-    save_state(args.state, state)
-    log.info("Стан збережено в %s", args.state)
+    # Стан зберігаємо, ЛИШЕ якщо все доїхало. Інакше оголошення осіло б у
+    # state як «вже бачене», і після полагодження каналу про нього б ніхто
+    # не дізнався — саме так хибний chat_id тихо з'їдав знахідки. Ціна —
+    # можливий дубль тих повідомлень, що встигли пройти до збою.
+    if undelivered:
+        log.error("Стан НЕ збережено: наступний прогін спробує надіслати ці ж події ще раз")
+    else:
+        save_state(args.state, state)
+        log.info("Стан збережено в %s", args.state)
 
     # Не валимо workflow через тимчасову помилку мережі, якщо хоч щось спрацювало.
     if errors and errors >= max(len(selected), 1):

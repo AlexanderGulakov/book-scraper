@@ -479,3 +479,61 @@ def test_heartbeat_reports_a_broken_run(monkeypatch):
     msgs, errors = app.run(cfg, state, dry_run=False)
     assert errors == 1
     assert len(msgs) == 1 and "не вдалась" in msgs[0] and "503" in msgs[0]
+
+
+# ── доставка ────────────────────────────────────────────────────────────────
+
+class _FakeTG(notify.Telegram):
+    def __init__(self, ok):
+        super().__init__("t", "c")
+        self.ok, self.sent = ok, []
+
+    def send(self, text, *, photo=None):
+        self.sent.append(text)
+        return self.ok
+
+
+def test_dispatch_counts_failures(monkeypatch):
+    monkeypatch.setattr(notify.time, "sleep", lambda *_: None)
+    good, bad = _FakeTG(True), _FakeTG(False)
+    assert notify.dispatch([good], ["a", "b"]) == 0
+    assert notify.dispatch([bad], ["a", "b"]) == 2, "кожне невдале має бути пораховане"
+    assert notify.dispatch([bad], []) == 0
+
+
+def test_env_values_are_stripped(monkeypatch):
+    """`set TELEGRAM_CHAT_ID="123"` у Windows кладе лапки всередину значення."""
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", ' "111:abc" ')
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", '"-1001234567890" ')
+    ch = notify.build_channels({})
+    tg = [c for c in ch if isinstance(c, notify.Telegram)]
+    assert tg and tg[0].token == "111:abc" and tg[0].chat_id == "-1001234567890"
+
+
+def test_load_env_reads_file_without_clobbering_real_env(tmp_path, monkeypatch):
+    env = tmp_path / ".env"
+    env.write_text(
+        "﻿# коментар\n"
+        "\n"
+        'TELEGRAM_CHAT_ID = "-1001234567890" \n'
+        "set TELEGRAM_BOT_TOKEN=111:abc\n"
+        "БЕЗ_ЗНАКА_РІВНОСТІ\n"
+        "SMTP_TO='me@example.com'\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("TELEGRAM_CHAT_ID", raising=False)
+    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+    monkeypatch.setenv("SMTP_TO", "вже-задане@example.com")
+
+    keys = app.load_env(env)
+
+    assert set(keys) == {"TELEGRAM_CHAT_ID", "TELEGRAM_BOT_TOKEN", "SMTP_TO"}
+    # лапки, пробіли, BOM і префікс `set ` зрізані
+    assert app.os.environ["TELEGRAM_CHAT_ID"] == "-1001234567890"
+    assert app.os.environ["TELEGRAM_BOT_TOKEN"] == "111:abc"
+    # справжнє середовище головніше за файл (секрети GitHub Actions)
+    assert app.os.environ["SMTP_TO"] == "вже-задане@example.com"
+
+
+def test_load_env_without_file_is_a_noop(tmp_path):
+    assert app.load_env(tmp_path / "немає.env") == []
