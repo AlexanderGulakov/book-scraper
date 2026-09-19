@@ -28,6 +28,33 @@ log = logging.getLogger("main")
 STATE_VERSION = 1
 
 
+# Що main.py очікує від сусідніх модулів. Перевіряється на старті, бо файли
+# копіюються на домашню машину руками й легко оновити не всі.
+REQUIRED_API = {
+    "notify": ["build_channels", "dispatch", "format_event", "format_test",
+               "format_heartbeat", "format_watch_error"],
+    "olx": ["build_session", "fetch_watch", "matches", "price_ok", "ad_state"],
+    "bookflea": ["collect"],
+}
+
+
+def check_modules() -> list[str]:
+    """Ловить різнобій версій файлів ДО того, як він стане трейсбеком.
+
+    Реальний випадок 2026-09-19: на домашню машину скопіювали новий main.py,
+    але старий notify.py — і `--test-notify` упав з
+    `AttributeError: module 'notify' has no attribute 'format_test'`.
+    Раніше так само помер цілий прогін через розсинхрон main.py/bookflea.py.
+    Діагноз має бути людським реченням, а не стеком.
+    """
+    return [
+        f"{mod}.{attr}"
+        for mod, attrs in REQUIRED_API.items()
+        for attr in attrs
+        if not hasattr(globals()[mod], attr)
+    ]
+
+
 def load_env(path: Path | None = None) -> list[str]:
     """Підтягує секрети з `.env` поруч зі скриптом. Повертає імена ключів.
 
@@ -542,6 +569,13 @@ def main() -> int:
         format="%(asctime)s %(levelname)-7s %(name)s │ %(message)s",
         datefmt="%H:%M:%S",
     )
+
+    stale = check_modules()
+    if stale:
+        log.error("Файли проєкту з різних версій — бракує: %s", ", ".join(stale))
+        log.error("Скопіюйте ВЕСЬ набір з одного коміту: main.py, notify.py, "
+                  "olx.py, bookflea.py, models.py, watches.yaml.")
+        return 1
 
     from_env_file = load_env()
     if from_env_file:

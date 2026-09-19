@@ -57,7 +57,11 @@ jobs:
           OLX_BACKEND: ${{ vars.OLX_BACKEND || 'curl_cffi' }}
           OLX_IMPERSONATE: ${{ vars.OLX_IMPERSONATE || 'chrome131' }}
         run: |
-          python main.py ${{ inputs.mode == 'dry-run' && '--dry-run' || '' }}
+          # --skip Букфлі: книгарня віддає каталог за IP клієнта, і з
+          # американської адреси runner'а це польський ринок — чужі
+          # оголошення в злотих. Букфлі крутиться вдома Планувальником
+          # Windows (run-bookflea.bat, окремий state.local.json).
+          python main.py --skip Букфлі ${{ inputs.mode == 'dry-run' && '--dry-run' || '' }}
 
       - name: Commit state
         if: always() && inputs.mode != 'probe'

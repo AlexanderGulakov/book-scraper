@@ -54,6 +54,14 @@ class Telegram:
                 if r.ok and r.json().get("ok"):
                     return True
                 log.error("Telegram %s: %s %s", method, r.status_code, r.text[:300])
+                hint = {
+                    400: "хибний TELEGRAM_CHAT_ID, або бота немає в цьому чаті "
+                         "(у приватний чат бот не напише першим — спершу треба /start)",
+                    401: "хибний TELEGRAM_BOT_TOKEN",
+                    403: "бота заблоковано або вигнано з чату",
+                }.get(r.status_code)
+                if hint:
+                    log.error("  ↳ найімовірніше: %s", hint)
                 return False
             except Exception as exc:  # noqa: BLE001
                 log.warning("Telegram помилка мережі (%s/3): %s", attempt + 1, exc)
@@ -161,11 +169,28 @@ def _fmt(value: float | None, currency: str | None) -> str:
     return f"{whole} {sym}".strip()
 
 
+def _clean(value: str | None) -> str:
+    return (value or "").strip().strip('"').strip("'").strip()
+
+
+def format_test() -> str:
+    """Повідомлення для --test-notify."""
+    return "\n".join([
+        "✅ <b>Перевірка зв'язку</b>",
+        "Бачиш це — отже токен і chat_id правильні.",
+        f"🕒 {_now_label()}",
+    ])
+
+
 def build_channels(cfg: dict[str, Any]) -> list[Any]:
     """Збирає канали з env-змінних. Секрети НІКОЛИ не лежать у конфігу."""
     channels: list[Any] = []
 
-    token, chat = os.getenv("TELEGRAM_BOT_TOKEN"), os.getenv("TELEGRAM_CHAT_ID")
+    # .strip() не косметика: у Windows `set TELEGRAM_CHAT_ID="123"` кладе лапки
+    # ВСЕРЕДИНУ значення, а зайвий пробіл у кінці рядка .bat так само стає
+    # частиною змінної. І те, й те Telegram повертає як 400 chat not found.
+    token = _clean(os.getenv("TELEGRAM_BOT_TOKEN"))
+    chat = _clean(os.getenv("TELEGRAM_CHAT_ID"))
     if token and chat:
         channels.append(Telegram(token, chat))
     elif cfg.get("notify", {}).get("telegram", True):
@@ -185,19 +210,29 @@ def build_channels(cfg: dict[str, Any]) -> list[Any]:
     return channels
 
 
-def dispatch(channels: list[Any], messages: list[str]) -> None:
+def dispatch(channels: list[Any], messages: list[str]) -> int:
+    """Розсилає й повертає КІЛЬКІСТЬ невдалих надсилань.
+
+    Раніше результат `send()` ігнорувався, і лог бадьоро писав «Надіслано N
+    сповіщень» навіть тоді, коли Telegram на кожне відповідав 400. Саме так
+    можна місяцями не помічати хибний chat_id.
+    """
     if not messages:
-        return
+        return 0
     overflow = len(messages) - MAX_MESSAGES_PER_RUN
     to_send = messages[:MAX_MESSAGES_PER_RUN]
     if overflow > 0:
         to_send.append(f"… і ще <b>{overflow}</b> збігів цього разу (звузьте фільтри або зменште інтервал).")
 
+    failed = 0
     for ch in channels:
         if isinstance(ch, Telegram):
             for msg in to_send:
-                ch.send(msg)
+                if not ch.send(msg):
+                    failed += 1
                 time.sleep(1.2)  # Telegram: ~30 повідомлень/сек загалом, 1/сек у чат
         elif isinstance(ch, Email):
             body = "<hr>".join(m.replace("\n", "<br>") for m in to_send)
-            ch.send(f"OLX: {len(messages)} нових подій", body)
+            if not ch.send(f"OLX: {len(messages)} нових подій", body):
+                failed += 1
+    return failed

@@ -537,3 +537,11 @@ def test_load_env_reads_file_without_clobbering_real_env(tmp_path, monkeypatch):
 
 def test_load_env_without_file_is_a_noop(tmp_path):
     assert app.load_env(tmp_path / "немає.env") == []
+
+
+def test_check_modules_spots_a_stale_file(monkeypatch):
+    """Старий notify.py поруч із новим main.py має дати речення, не трейсбек."""
+    assert app.check_modules() == [], "набір у репозиторії має бути узгоджений"
+
+    monkeypatch.delattr(app.notify, "format_test")
+    assert app.check_modules() == ["notify.format_test"]
