@@ -561,6 +561,8 @@ def main() -> int:
     ap.add_argument("--reset", action="store_true", help="забути стан (наступний запуск буде seed)")
     ap.add_argument("--test-notify", action="store_true",
                     help="надіслати тестове повідомлення в канали й вийти (нічого не сканує)")
+    ap.add_argument("--find-chat", action="store_true",
+                    help="показати chat_id чатів, де бот нещодавно бачив повідомлення")
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()
 
@@ -583,6 +585,26 @@ def main() -> int:
         log.info(".env: підхопив %s", ", ".join(from_env_file))
 
     cfg = load_config(args.config)
+
+    if args.find_chat:
+        try:
+            chats = notify.recent_chats()
+        except Exception as exc:  # noqa: BLE001
+            log.error("Не вдалось спитати Telegram: %s", exc)
+            log.error("409 → на бота навішано webhook (зніміть deleteWebhook); "
+                      "401 → хибний TELEGRAM_BOT_TOKEN.")
+            return 1
+        if not chats:
+            log.error("Telegram не показав жодного чату.")
+            log.error("Напишіть боту в потрібний чат (у приват — /start, у групі — "
+                      "будь-яке повідомлення) і запустіть ще раз: getUpdates "
+                      "пам'ятає лише останню добу.")
+            return 1
+        log.info("Знайдено чатів: %s", len(chats))
+        for c in chats:
+            log.info("  TELEGRAM_CHAT_ID=%-16s %-10s %s", c["id"], c["type"], c["title"])
+        log.info("Потрібний рядок скопіюйте в .env, тоді: py main.py --test-notify")
+        return 0
 
     if args.test_notify:
         channels = notify.build_channels(cfg)
