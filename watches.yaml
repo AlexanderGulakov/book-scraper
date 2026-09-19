@@ -43,6 +43,18 @@ defaults:
     - ps5
     - xbox
     - nintendo
+    - плакат
+
+  # Російськомовні видання не потрібні (рішення 2026-09-19). Тут — лише явні
+  # мовні маркери в заголовку; самі російські назви прибрані з include_keywords
+  # кожного watch, а російські написання авторів — у їхніх exclude.
+    - російською
+    - російськ
+    - "рос. мов"
+    - "рос.мов"
+    - "(рос)"
+    - русск
+    - на русском
 
 watches:
   # Без include_keywords сюди летіли птахи, церкви України та виборчі спори:
@@ -187,17 +199,13 @@ watches:
       # ...і назви книжок: частина оголошень підписана лише назвою,
       # без автора («Шовкопряд/Книга/Тверда обкладинка»)
       - "кувала зозуля"
-      - "зов кукушки"
       - "cuckoo"
       - "шовкопряд"
-      - "шелкопряд"
       - "silkworm"
       - "лиходія"            # «Кар'єра лиходія» — апостроф буває різний
       - "career of evil"
       - "на службі зла"
-      - "на службе зла"
       - "убивчий білий"
-      - "смертельная белизна"
       - "lethal white"
       - "бентежна кров"
       - "troubled blood"
@@ -213,7 +221,7 @@ watches:
   - name: "Лоліта (Набоков)"
     url: "https://www.olx.ua/uk/hobbi-otdyh-i-sport/knigi-zhurnaly/q-%D0%BB%D0%BE%D0%BB%D1%96%D1%82%D0%B0-%D0%BD%D0%B0%D0%B1%D0%BE%D0%BA%D0%BE%D0%B2/?currency=UAH&search%5Border%5D=created_at%3Adesc"
     max_price: 2000
-    include_keywords: ["лоліта", "лолита", "lolita"]
+    include_keywords: ["лоліта", "lolita"]
     exclude_keywords: ["мілявська", "милявская", "привычка", "цекало"]
 
   # 27 з 40 було не по темі: довідник механізатора, залізобетонні конструкції
@@ -224,8 +232,184 @@ watches:
     include_keywords: ["бункер"]
     exclude_keywords: ["b.u.n.k.e.r", "норія", "нория", "сепаратор", "транспортер"]
 
+  # ── Стівен Кінг: вісім конкретних назв ────────────────────────────────────
+  # Полюємо НЕ на всього Кінга (його на OLX десятки щодня), а на вісім книжок.
+  #
+  # Ключовий прийом — двослівний запит «<назва> кінг». OLX вимагає обидва
+  # слова (шукає і в заголовку, і в описі), і це дає фактичний AND, якого
+  # include_keywords зробити не вміє: там усі слова через АБО. Виміряно
+  # 2026-09-19 на живій видачі:
+  #
+  #   q-сплячі-красуні        41 оголошення, ЖОДНОГО Кінга — самі Перро й Disney
+  #   q-сплячі-красуні-кінг    8 оголошень, усі по темі
+  #   q-про-письменство       40 оголошень, майже все — серія «Вершини
+  #                              світового письменства» й історія культури
+  #   q-про-письменство-кінг   5 оголошень, усі по темі
+  #
+  # Дві назви достатньо унікальні, щоб шукати без прізвища: «чотири після
+  # півночі» (10/10 по темі) і «ярмарок нічних жахіть» (8/8).
+  #
+  # Плюс збиральний запит «стівен кінг» — він ловить комплекти й лоти, де
+  # потрібна книжка згадана серед інших, і оголошення, підписані автором.
+  #
+  # include/exclude спільні на всі дев'ять watch'ів (як у Клер): якщо потрібна
+  # назва виринула в будь-якій з видач — повідомляємо. Дублікати не страшні,
+  # одне оголошення = одне повідомлення за прогін.
+  - name: "Кінг: Чотири після півночі"
+    url: "https://www.olx.ua/uk/hobbi-otdyh-i-sport/knigi-zhurnaly/q-%D1%87%D0%BE%D1%82%D0%B8%D1%80%D0%B8-%D0%BF%D1%96%D1%81%D0%BB%D1%8F-%D0%BF%D1%96%D0%B2%D0%BD%D0%BE%D1%87%D1%96/?currency=UAH&search%5Border%5D=created_at%3Adesc"
+    max_price: &king_max 2000
+    include_keywords: &king_books
+      - "чотири після півночі"      # Four Past Midnight, КСД у двох книгах
+      - "чотири після опівночі"
+      - "four past midnight"
+      - "сплячі красуні"            # Sleeping Beauties, зі Овеном Кінгом
+      - "sleeping beaut"
+      - "чорний дім"                # Black House, зі Страубом
+      - "black house"
+      - "піднесен"                  # Elevation; ловить і одрук «піднесеня»
+      - "elevation"
+      - "письменств"                # «Про письменство. Мемуари про ремесло»
+      - "on writing"
+      - "відродження"               # Revival
+      - "revival"
+      - "ярмарок нічних"            # The Bazaar of Bad Dreams
+      - "нічних жахіть"
+      - "bazaar of bad dreams"
+      - "bazar of bad dreams"       # так теж пишуть в оголошеннях
+      - "талісман"                  # The Talisman, зі Страубом
+      - "talisman"
+      - "протистояння"              # The Stand, КСД у двох томах
+      - "the stand"
+    exclude_keywords: &king_noise
+      - "вершини світового"   # серія «Вершини світового письменства» — не Кінг
+      - "польською"           # польські видання трапляються і дешеві
+      - "польськ"
+      - "czarny dom"
+      - "złych snów"
+      # Російські видання не цікавлять. Прізвище й ім'я в російському написанні —
+      # найнадійніша ознака: «Кінг» українською пишеться через «і», тож «кинг»
+      # у заголовку = російське видання. Ловить і «Стивен Кинг Черный дом»,
+      # і двомовні заголовки штибу «Стивен Кинг Талисман Стівен Кінг».
+      - "кинг"
+      - "стивен"
+
+  - name: "Кінг: Сплячі красуні"
+    # без «кінг» у запиті сюди летять Шарль Перро й Disney — 41 з 41 не по темі
+    url: "https://www.olx.ua/uk/hobbi-otdyh-i-sport/knigi-zhurnaly/q-%D1%81%D0%BF%D0%BB%D1%8F%D1%87%D1%96-%D0%BA%D1%80%D0%B0%D1%81%D1%83%D0%BD%D1%96-%D0%BA%D1%96%D0%BD%D0%B3/?currency=UAH&search%5Border%5D=created_at%3Adesc"
+    max_price: *king_max
+    include_keywords: *king_books
+    exclude_keywords: *king_noise
+
+  - name: "Кінг: Чорний дім"
+    url: "https://www.olx.ua/uk/hobbi-otdyh-i-sport/knigi-zhurnaly/q-%D1%87%D0%BE%D1%80%D0%BD%D0%B8%D0%B9-%D0%B4%D1%96%D0%BC-%D0%BA%D1%96%D0%BD%D0%B3/?currency=UAH&search%5Border%5D=created_at%3Adesc"
+    max_price: *king_max
+    include_keywords: *king_books
+    exclude_keywords: *king_noise
+
+  - name: "Кінг: Піднесення"
+    url: "https://www.olx.ua/uk/hobbi-otdyh-i-sport/knigi-zhurnaly/q-%D0%BF%D1%96%D0%B4%D0%BD%D0%B5%D1%81%D0%B5%D0%BD%D0%BD%D1%8F-%D0%BA%D1%96%D0%BD%D0%B3/?currency=UAH&search%5Border%5D=created_at%3Adesc"
+    max_price: *king_max
+    include_keywords: *king_books
+    exclude_keywords: *king_noise
+
+  - name: "Кінг: Про письменство"
+    url: "https://www.olx.ua/uk/hobbi-otdyh-i-sport/knigi-zhurnaly/q-%D0%BF%D1%80%D0%BE-%D0%BF%D0%B8%D1%81%D1%8C%D0%BC%D0%B5%D0%BD%D1%81%D1%82%D0%B2%D0%BE-%D0%BA%D1%96%D0%BD%D0%B3/?currency=UAH&search%5Border%5D=created_at%3Adesc"
+    max_price: *king_max
+    include_keywords: *king_books
+    exclude_keywords: *king_noise
+
+  - name: "Кінг: Відродження"
+    url: "https://www.olx.ua/uk/hobbi-otdyh-i-sport/knigi-zhurnaly/q-%D0%B2%D1%96%D0%B4%D1%80%D0%BE%D0%B4%D0%B6%D0%B5%D0%BD%D0%BD%D1%8F-%D0%BA%D1%96%D0%BD%D0%B3/?currency=UAH&search%5Border%5D=created_at%3Adesc"
+    max_price: *king_max
+    include_keywords: *king_books
+    exclude_keywords: *king_noise
+
+  - name: "Кінг: Ярмарок нічних жахіть"
+    url: "https://www.olx.ua/uk/hobbi-otdyh-i-sport/knigi-zhurnaly/q-%D1%8F%D1%80%D0%BC%D0%B0%D1%80%D0%BE%D0%BA-%D0%BD%D1%96%D1%87%D0%BD%D0%B8%D1%85-%D0%B6%D0%B0%D1%85%D1%96%D1%82%D1%8C/?currency=UAH&search%5Border%5D=created_at%3Adesc"
+    max_price: *king_max
+    include_keywords: *king_books
+    exclude_keywords: *king_noise
+
+  - name: "Кінг: Талісман"
+    url: "https://www.olx.ua/uk/hobbi-otdyh-i-sport/knigi-zhurnaly/q-%D1%82%D0%B0%D0%BB%D1%96%D1%81%D0%BC%D0%B0%D0%BD-%D0%BA%D1%96%D0%BD%D0%B3/?currency=UAH&search%5Border%5D=created_at%3Adesc"
+    max_price: *king_max
+    include_keywords: *king_books
+    exclude_keywords: *king_noise
+
+  - name: "Кінг: Протистояння"
+    url: "https://www.olx.ua/uk/hobbi-otdyh-i-sport/knigi-zhurnaly/q-%D0%BF%D1%80%D0%BE%D1%82%D0%B8%D1%81%D1%82%D0%BE%D1%8F%D0%BD%D0%BD%D1%8F-%D0%BA%D1%96%D0%BD%D0%B3/?currency=UAH&search%5Border%5D=created_at%3Adesc"
+    max_price: *king_max
+    include_keywords: *king_books
+    exclude_keywords: *king_noise
+
+  # Виміряно 2026-09-19: 52 оголошення, крізь фільтр пройшло 1. Це нормально —
+  # запит існує не заради врожаю, а щоб не проґавити лот чи комплект, у назві
+  # якого стоїть автор, а не назва книжки. Якщо набридне — enabled: false.
+  - name: "Кінг: збірний (лоти й комплекти)"
+    url: "https://www.olx.ua/uk/hobbi-otdyh-i-sport/knigi-zhurnaly/q-%D1%81%D1%82%D1%96%D0%B2%D0%B5%D0%BD-%D0%BA%D1%96%D0%BD%D0%B3/?currency=UAH&search%5Border%5D=created_at%3Adesc"
+    max_price: *king_max
+    include_keywords: *king_books
+    exclude_keywords: *king_noise
+
+  # ── Ренсом Ріггз, будь-які книжки ─────────────────────────────────────────
+  # Два запити, бо частина оголошень підписана лише назвою серії, без автора,
+  # а частина — навпаки. Прізвище пишуть чотирма способами (Ріггз, Ріґґз,
+  # Риггз, Riggs), тому воно в include цілком, а не в запиті.
+  - name: "Ренсом Ріггз (автор)"
+    url: "https://www.olx.ua/uk/hobbi-otdyh-i-sport/knigi-zhurnaly/q-%D1%80%D0%B5%D0%BD%D1%81%D0%BE%D0%BC-%D1%80%D1%96%D0%B3%D0%B3%D0%B7/?currency=UAH&search%5Border%5D=created_at%3Adesc"
+    max_price: 2000
+    include_keywords: &riggs_books
+      # прізвище — усі написання, які реально трапились у видачі 2026-09-19
+      - "ріггз"
+      - "ріґґз"
+      - "ріґз"
+      - "рігз"
+      - "риггз"
+      - "риґґз"
+      - "ригз"
+      - "riggs"
+      - "ренсом"
+      # назви: частина оголошень підписана лише назвою, без автора.
+      # Російські назви навмисно НЕ перелічені — російські видання не потрібні.
+      - "дивних дітей"           # «Дім дивних дітей», кн. 1
+      - "peculiar children"
+      - "місто порожніх"         # кн. 2
+      - "місто пустих"
+      - "hollow city"
+      - "бібліотека душ"         # кн. 3
+      - "library of souls"
+      - "карта днів"             # кн. 4
+      - "map of days"
+      - "пташині збори"          # кн. 5
+      - "conference of the birds"
+      - "спустошення диявольськ" # кн. 6
+      - "диявольського акра"
+      - "desolations of devil"
+      - "казки про дивних"       # збірка оповідок
+      - "tales of the peculiar"
+      - "леопольда беррі"        # «Надзвичайні розчарування Леопольда Беррі»
+    exclude_keywords: &riggs_noise
+      # Російські назви циклу в заголовку = російське видання. Пишуть їх і з
+      # одруками («Дом Странних Детей», «Библеотека душ»), тому ловимо корені.
+      # «библ» безпечне: українською це «бібліотека», через «і».
+      - "библ"
+      - "дом стран"
+      - "странных"
+      - "странних"
+      - "город пуст"
+      - "карта дней"
+      - "собрание птиц"
+      - "сказки о стран"
+      - "дьявольского"
+
+  - name: "Ріггз: Дім дивних дітей (за серією)"
+    url: "https://www.olx.ua/uk/hobbi-otdyh-i-sport/knigi-zhurnaly/q-%D0%B4%D1%96%D0%BC-%D0%B4%D0%B8%D0%B2%D0%BD%D0%B8%D1%85-%D0%B4%D1%96%D1%82%D0%B5%D0%B9/?currency=UAH&search%5Border%5D=created_at%3Adesc"
+    max_price: 2000
+    include_keywords: *riggs_books
+    exclude_keywords: *riggs_noise
+
   # ── Букфлі ────────────────────────────────────────────────────────────────
-  # mode: search — окремий запит на кожне ключове слово, дев'ять за прогін.
+  # mode: search — окремий запит на кожне ключове слово, одинадцять за прогін.
   #
   # Чому НЕ mode: latest (один запит за найновішими). Перевірено 2026-09-17:
   # з України сторінка /search віддає свіжину (оголошення того ж дня), а з
@@ -237,8 +421,8 @@ watches:
   # Пошук за словом від порядку видачі не залежить узагалі: книжка знайдеться
   # хоч у свіжому зрізі, хоч у вчорашньому.
   #
-  # Ціна — 9 запитів за прогін замість одного, тому перевіряємо раз на 30 хв,
-  # а не щоразу разом з OLX: ~430 запитів і ~45 МБ на добу. Для книжок, які
+  # Ціна — 11 запитів за прогін замість одного, тому перевіряємо раз на 30 хв,
+  # а не щоразу разом з OLX: ~530 запитів і ~55 МБ на добу. Для книжок, які
   # висять тижнями, півгодини затримки нічого не міняють.
   # Між запитами пауза 2.5-4 с, паралельно нічого не шлеться.
   # Якщо сайт колись почне віддавати 403 — підняти до 60.
@@ -258,6 +442,20 @@ watches:
       - Служниця
       - Кідрук
       - Гаррі Поттер
+      # Кінг і Ріггз — одним словом за прізвищем, а не дев'ятьма назвами.
+      # Перевірка на Букфлі локальна й підрядкова по «автор + назва», тож
+      # прізвище ловить усі книжки автора одним запитом. Кінг там трапляється
+      # рідко, і платити за точність вісьмома зайвими запитами не варто:
+      # заміряно 2026-09-19 — «Кінг» дає 18 карток, з них 11 Стівена Кінга,
+      # решта чужі, і жодної з восьми потрібних назв у каталозі взагалі немає.
+      - Кінг
+      - Ріггз
+    # Чужі автори, що лізуть на слово «Кінг». Фільтр дивиться в «назва + автор»
+    # (тому й «кінгфішер» спрацьовує, хоч у назві книжки його немає).
+    exclude_keywords:
+      - кінгфішер
+      - векс кінг
+      - кінгстон
     max_price: 2000        # спільна межа-заглушка, потім налаштуєте
 
 # Шпаргалка по параметрах watch:

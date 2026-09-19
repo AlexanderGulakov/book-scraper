@@ -134,7 +134,11 @@ def matches(ad: Ad, *, include: Iterable[str] = (), exclude: Iterable[str] = (),
         return False
     if skip_promoted and ad.promoted:
         return False
-    haystack = f"{ad.title}".casefold()
+    # Автор входить у пошук нарівні з назвою: Букфлі віддає його окремим полем,
+    # і без цього exclude_keywords не може відсіяти чужого автора («Кінгфішер»,
+    # «Векс Кінг»), бо в назві книжки його прізвища немає. В OLX author=None,
+    # тож там нічого не змінюється.
+    haystack = f"{ad.title} {ad.author or ''}".casefold()
     inc = [w.casefold() for w in include if w]
     if inc and not any(w in haystack for w in inc):
         return False

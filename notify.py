@@ -7,6 +7,7 @@ import logging
 import os
 import smtplib
 import time
+from datetime import datetime
 from email.message import EmailMessage
 from typing import Any
 
@@ -123,6 +124,33 @@ def format_event(kind: str, watch_name: str, ad, old_price: float | None = None)
     if meta:
         bits.append("📍 " + esc(" · ".join(meta)))
     return "\n".join(bits)
+
+
+def format_heartbeat(watch_name: str, *, keywords: int, seen: int, kept: int,
+                     known: int, when: str | None = None) -> str:
+    """«Живий, просто нічого нового» — пульс для watch'а з heartbeat_hours.
+
+    Навіщо. Прогін, у якому нічого не знайшлось, і прогін, у якому скрапер
+    тихо зламався, з боку Telegram виглядають однаково — ніяк. Пульс робить
+    тишу помітною: поки повідомлення приходять, мовчання каналу означає
+    поломку, а не відсутність книжок.
+    """
+    head = f"💤 <b>{esc(watch_name)}</b> — нічого нового"
+    line = f"🔎 слів: {keywords} · у видачі: {seen} · підійшло: {kept} · у пам'яті: {known}"
+    return "\n".join([head, line, f"🕒 {esc(when or _now_label())}"])
+
+
+def format_watch_error(watch_name: str, exc: Any) -> str:
+    """Скрапер упав. Для watch'а з пульсом про це треба сказати вголос."""
+    return "\n".join([
+        f"⚠️ <b>{esc(watch_name)}</b> — перевірка не вдалась",
+        f"<code>{esc(exc)}</code>",
+        f"🕒 {esc(_now_label())}",
+    ])
+
+
+def _now_label() -> str:
+    return datetime.now().strftime("%d.%m, %H:%M")
 
 
 def _fmt(value: float | None, currency: str | None) -> str:

@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 import sys
 from pathlib import Path
 
@@ -381,3 +382,100 @@ def test_report_shows_price_and_lifetime(monkeypatch):
     assert "Медіана: <b>300 грн</b>" in text
     assert "⏳" in text, "довгожителя позначили — це міг бути не продаж"
     assert "150 UAH" in text and "дн." in text
+
+
+def test_exclude_matches_author_not_only_title():
+    """Букфлі віддає автора окремим полем — exclude_keywords має його бачити.
+
+    Один запит «Кінг» на Букфлі приносить і Стівена Кінга, і Т. Кінгфішера
+    з Вексом Кінгом. Прізвища чужих авторів у назві книжки немає, тож без
+    автора в haystack відсіяти їх неможливо.
+    """
+    from models import Ad
+
+    def ad(title, author):
+        return Ad(id="1", title=title, url="", price=300.0, currency="UAH",
+                  price_text="300 грн", author=author, source="bookflea")
+
+    king = ad("Аутсайдер", "Стівен Кінг")
+    other = ad("Клятвений солдат. Книга 1", "Т. Кінгфішер")
+
+    assert olx.matches(king, exclude=["кінгфішер"])
+    assert not olx.matches(other, exclude=["кінгфішер"])
+    # в OLX author=None — поведінка не змінилась
+    assert olx.matches(ad("Сяйво", None), exclude=["кінгфішер"])
+
+
+# ── пульс ───────────────────────────────────────────────────────────────────
+
+def test_heartbeat_due_respects_interval():
+    from datetime import datetime, timezone, timedelta
+
+    assert not app.heartbeat_due({}, {}), "без heartbeat_hours пульсу немає"
+    assert not app.heartbeat_due({"heartbeat_hours": False}, {})
+    assert app.heartbeat_due({"heartbeat_hours": 0}, {}), "0 — щоразу"
+
+    recent = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+    old = (datetime.now(timezone.utc) - timedelta(hours=7)).isoformat()
+    assert not app.heartbeat_due({"heartbeat_hours": 6}, {"heartbeat_last": recent})
+    assert app.heartbeat_due({"heartbeat_hours": 6}, {"heartbeat_last": old})
+    assert app.heartbeat_due({"heartbeat_hours": 0}, {"heartbeat_last": recent}), \
+        "0 ігнорує попередній пульс"
+
+
+def test_heartbeat_fires_only_on_empty_run(monkeypatch, tmp_path):
+    """Порожній прогін Букфлі → «живий»; прогін зі знахідкою → тільки знахідка."""
+    from models import Ad
+
+    ad = Ad(id="bf1", title="Служниця", url="https://bookflea.co/ads/bf1",
+            price=300.0, currency="UAH", price_text="300 грн",
+            author="Фріда Мак-Фадден", source="bookflea")
+
+    cfg = {
+        "defaults": {"currency": "UAH", "pause_between_watches": 0},
+        "watches": [{
+            "name": "Букфлі", "source": "bookflea", "mode": "search",
+            "keywords": ["Служниця", "Кінг"], "max_price": 2000,
+            "use_default_excludes": False, "heartbeat_hours": 0,
+        }],
+    }
+    monkeypatch.setattr(app.olx, "build_session", lambda: None)
+    monkeypatch.setattr(app, "bookflea_notes", lambda *a, **k: [])
+
+    # перший прогін — seed, мовчки і без пульсу
+    state = {"version": app.STATE_VERSION, "watches": {}}
+    monkeypatch.setattr(app.bookflea, "collect", lambda *a, **k: ([ad], [ad.id]))
+    msgs, _ = app.run(cfg, state, dry_run=False)
+    assert msgs == [], "seed не шле нічого, зокрема й пульсу"
+
+    # другий прогін, те саме оголошення — новин немає → пульс
+    msgs, _ = app.run(cfg, state, dry_run=False)
+    assert len(msgs) == 1 and "нічого нового" in msgs[0]
+    assert "слів: 2" in msgs[0]
+
+    # третій — з'явилось нове оголошення → знахідка, пульс зайвий
+    fresh = replace(ad, id="bf2", title="Служниця спостерігає")
+    monkeypatch.setattr(app.bookflea, "collect", lambda *a, **k: ([ad, fresh], [ad.id, fresh.id]))
+    msgs, _ = app.run(cfg, state, dry_run=False)
+    assert len(msgs) == 1 and "Нове оголошення" in msgs[0]
+
+
+def test_heartbeat_reports_a_broken_run(monkeypatch):
+    """Скрапер упав — це має долетіти, а не потонути в логах."""
+    cfg = {
+        "defaults": {"pause_between_watches": 0},
+        "watches": [{
+            "name": "Букфлі", "source": "bookflea", "mode": "search",
+            "keywords": ["Кінг"], "heartbeat_hours": 0,
+        }],
+    }
+    monkeypatch.setattr(app.olx, "build_session", lambda: None)
+
+    def boom(*a, **k):
+        raise app.bookflea.BookfleaError("HTTP 503")
+
+    monkeypatch.setattr(app.bookflea, "collect", boom)
+    state = {"version": app.STATE_VERSION, "watches": {}}
+    msgs, errors = app.run(cfg, state, dry_run=False)
+    assert errors == 1
+    assert len(msgs) == 1 and "не вдалась" in msgs[0] and "503" in msgs[0]

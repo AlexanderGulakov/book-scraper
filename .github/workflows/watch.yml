@@ -47,9 +47,6 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          BOOKFLEA_EMAIL: ${{ secrets.BOOKFLEA_EMAIL }}
-          BOOKFLEA_PASSWORD: ${{ secrets.BOOKFLEA_PASSWORD }}
-          BOOKFLEA_COOKIE: ${{ secrets.BOOKFLEA_COOKIE }}
           # Необов'язково — якщо хочете ще й e-mail:
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
           SMTP_PORT: ${{ secrets.SMTP_PORT }}
@@ -60,6 +57,10 @@ jobs:
           OLX_BACKEND: ${{ vars.OLX_BACKEND || 'curl_cffi' }}
           OLX_IMPERSONATE: ${{ vars.OLX_IMPERSONATE || 'chrome131' }}
         run: |
+          # --skip Букфлі: книгарня віддає каталог за IP клієнта, і з
+          # американської адреси runner'а це польський ринок — чужі
+          # оголошення в злотих. Букфлі крутиться вдома Планувальником
+          # Windows (run-bookflea.bat, окремий state.local.json).
           python main.py --skip Букфлі ${{ inputs.mode == 'dry-run' && '--dry-run' || '' }}
 
       - name: Commit state

@@ -275,6 +275,18 @@ def sold_report(cfg: dict[str, Any], state: dict[str, Any], session: Any,
     return ["\n".join(lines)]
 
 
+def heartbeat_due(opt: dict[str, Any], ws: dict[str, Any]) -> bool:
+    """Чи час слати «живий» для цього watch'а.
+
+    `heartbeat_hours` у watch: 0 — щоразу, N — не частіше ніж раз на N годин.
+    Ключа немає (або false) — пульсу немає, поведінка як була.
+    """
+    hours = opt.get("heartbeat_hours")
+    if hours is None or hours is False:
+        return False
+    return due({"last_run": ws.get("heartbeat_last")}, float(hours) * 60)
+
+
 def run(cfg: dict[str, Any], state: dict[str, Any], *, dry_run: bool,
         only: list[str] | None = None, skip: list[str] | None = None) -> tuple[list[str], int]:
     defaults = cfg.get("defaults", {}) or {}
@@ -323,6 +335,11 @@ def run(cfg: dict[str, Any], state: dict[str, Any], *, dry_run: bool,
         except (olx.OlxError, bookflea.BookfleaError) as exc:
             log.error("  ✖ %s", exc)
             errors += 1
+            # Watch із пульсом мовчати не має права навіть коли впав: інакше
+            # зламаний скрапер виглядає точнісінько як «нічого не знайшлось».
+            if heartbeat_due(opt, ws):
+                messages.append(notify.format_watch_error(name, exc))
+                ws["heartbeat_last"] = now
             continue
 
         if source == "bookflea":
@@ -433,6 +450,18 @@ def run(cfg: dict[str, Any], state: dict[str, Any], *, dry_run: bool,
             log.info("  перший запуск: запам'ятав %s оголошень, сповіщення не слав", len(kept))
         else:
             log.info("  нових: %s, здешевлень: %s", new_cnt, drop_cnt)
+            # Знахідка сама по собі доводить, що скрапер живий, тож пульс
+            # потрібен лише в порожній прогін.
+            if not (new_cnt or drop_cnt) and heartbeat_due(opt, ws):
+                messages.append(notify.format_heartbeat(
+                    name,
+                    keywords=len(w.get("keywords") or []),
+                    seen=len(ads),
+                    kept=len(kept),
+                    known=len(known),
+                ))
+                ws["heartbeat_last"] = now
+                log.info("  пульс надіслано")
 
         removed = prune(ws, int(opt.get("prune_days", 30)))
         if removed:
