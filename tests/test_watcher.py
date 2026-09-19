@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import pytest
 from dataclasses import replace
 import sys
 from pathlib import Path
@@ -545,3 +546,44 @@ def test_check_modules_spots_a_stale_file(monkeypatch):
 
     monkeypatch.delattr(app.notify, "format_test")
     assert app.check_modules() == ["notify.format_test"]
+
+
+def test_recent_chats_collects_ids_from_updates(monkeypatch):
+    payload = {"ok": True, "result": [
+        {"message": {"chat": {"id": 111, "type": "private", "first_name": "Alex"}}},
+        {"message": {"chat": {"id": 111, "type": "private", "first_name": "Alex"}}},
+        {"channel_post": {"chat": {"id": -1001234567890, "type": "channel", "title": "Книжки"}}},
+        {"my_chat_member": {"chat": {"id": -900, "type": "group", "title": "Сімейний"}}},
+        {"poll": {"id": "нічого корисного"}},
+    ]}
+
+    class _R:
+        content = b"{}"
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return payload
+
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", ' "111:abc" ')
+    monkeypatch.setattr(notify.requests, "get", lambda *a, **k: _R())
+
+    chats = notify.recent_chats()
+    assert [c["id"] for c in chats] == [111, -1001234567890, -900], "дублі згорнуті, порядок збережений"
+    assert chats[0]["title"] == "Alex" and chats[1]["title"] == "Книжки"
+
+
+def test_recent_chats_explains_a_telegram_refusal(monkeypatch):
+    class _R:
+        content = b"{}"
+        status_code = 409
+
+        @staticmethod
+        def json():
+            return {"ok": False, "description": "Conflict: can't use getUpdates method while webhook is active"}
+
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "111:abc")
+    monkeypatch.setattr(notify.requests, "get", lambda *a, **k: _R())
+
+    with pytest.raises(RuntimeError, match="webhook"):
+        notify.recent_chats()

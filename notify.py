@@ -169,6 +169,38 @@ def _fmt(value: float | None, currency: str | None) -> str:
     return f"{whole} {sym}".strip()
 
 
+def recent_chats() -> list[dict[str, Any]]:
+    """Чати, де бот нещодавно бачив повідомлення — щоб знайти свій chat_id.
+
+    Два обмеження самого Telegram, про які варто знати:
+    getUpdates пам'ятає лише останню добу, і він мовчить (409), якщо на бота
+    навішано webhook. Тому спершу треба щось боту написати.
+    """
+    token = _clean(os.getenv("TELEGRAM_BOT_TOKEN"))
+    if not token:
+        raise RuntimeError("TELEGRAM_BOT_TOKEN не заданий")
+    r = requests.get(TG_API.format(token=token, method="getUpdates"),
+                     params={"limit": 100}, timeout=30)
+    data = r.json() if r.content else {}
+    if not data.get("ok"):
+        raise RuntimeError(f"{r.status_code} {data.get('description') or r.text[:200]}")
+
+    found: dict[Any, dict[str, Any]] = {}
+    for upd in data.get("result", []):
+        for key in ("message", "edited_message", "channel_post",
+                    "my_chat_member", "callback_query"):
+            node = upd.get(key) or {}
+            chat = node.get("chat") or (node.get("message") or {}).get("chat") or {}
+            cid = chat.get("id")
+            if cid is None:
+                continue
+            name = (chat.get("title") or chat.get("username")
+                    or " ".join(x for x in (chat.get("first_name"), chat.get("last_name")) if x)
+                    or "—")
+            found.setdefault(cid, {"id": cid, "type": chat.get("type", "?"), "title": name})
+    return list(found.values())
+
+
 def _clean(value: str | None) -> str:
     return (value or "").strip().strip('"').strip("'").strip()
 
