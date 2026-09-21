@@ -1,29 +1,36 @@
 @echo off
 rem ============================================================================
-rem  Букфлі: один прогін. Цей файл запускає Планувальник Windows.
+rem  Bookflea watcher: one run. Launched by Windows Task Scheduler.
 rem
-rem  Навіщо окремий .bat, а не команда прямо в завданні: тут видно, що саме
-rem  виконується, і це можна правити без перестворення завдання.
+rem  ASCII ONLY -- DO NOT PUT NON-ASCII CHARACTERS IN THIS FILE.
 rem
-rem  Чому Букфлі крутиться вдома, а не в GitHub Actions: сайт вибирає каталог
-rem  за IP клієнта, і з американської адреси віддає польський ринок.
+rem  This file used to carry Ukrainian comments plus "chcp 65001". That
+rem  combination silently destroys the script: cmd.exe re-reads a .bat from a
+rem  byte offset after every command, so switching the code page midway
+rem  through a file that contains multi-byte characters shifts those offsets.
+rem  The parser then splits comment lines in half and tries to execute the
+rem  tails, e.g.  'peretvoryuyetsya' is not recognized as a command.
+rem  It happened to work on one machine and broke on another - see README,
+rem  section "Bookflea vdoma".
+rem
+rem  chcp is gone for good: output goes to a FILE, not to the console, and
+rem  PYTHONUTF8/PYTHONIOENCODING already make Python write UTF-8 there.
+rem  Explanations live in README.md, not here.
 rem ============================================================================
 
-rem UTF-8 у консолі: без цього кирилиця в логах перетворюється на кашу
-chcp 65001 >nul
 set PYTHONIOENCODING=utf-8
 set PYTHONUTF8=1
 
 cd /d "%~dp0"
 
-rem py.exe — стандартний лаунчер Python на Windows; якщо його немає, пробуємо python
+rem py.exe is the standard Python launcher on Windows; fall back to python.exe
 where py >nul 2>nul && (set PY=py -3) || (set PY=python)
 
 if not exist logs mkdir logs
 
-rem --only bookflea  — лише книгарня (решту пошуків робить GitHub Actions)
-rem --state          — ОКРЕМИЙ файл стану, щоб не воювати з тим, що пушить хмара
+rem --only bookflea : OLX searches are handled by GitHub Actions
+rem --state         : separate state file, so the cloud and this machine
+rem                   never overwrite each other's state.json
 %PY% main.py --only bookflea --state state.local.json >> "logs\bookflea.log" 2>&1
 
-rem Лишаємо в логу розділювач із часом, щоб прогони не зливались в одну стіну
-echo --- %date% %time% exit=%errorlevel% >> "logs\bookflea.log"
+echo --- %date% %time% exit=%errorlevel% >> "logs\bookflea.log"

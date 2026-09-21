@@ -1,0 +1,78 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Шаблон завдання Планувальника для Букфлі.
+  Плейсхолдер каталогу підставляє install_task.py — руками не правлять.
+
+  Чому завдання створюється з XML, а не командою schtasks /Create: та
+  команда не дає керувати Settings узагалі, а тут вони важливі — надолуження
+  пропущених прогонів, ліміт часу, робоча тека.
+
+  Поведінка на батареї — свідомий вибір користувача: ноутбук майже завжди в
+  розетці, а на батареї важливіше економити, ніж стежити за книжками. Тому
+  обидва батарейні прапорці лишаються увімкненими. Разом зі StartWhenAvailable
+  це дає: на батареї не запускаємось, а щойно ноутбук у розетці — пропущений
+  прогін відбувається одразу, не чекаючи наступних півгодини.
+-->
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Author>bookflea-install.bat</Author>
+    <Description>Bookflea watcher: checks bookflea.co every 30 minutes and posts finds to Telegram.</Description>
+  </RegistrationInfo>
+  <Triggers>
+    <TimeTrigger>
+      <StartBoundary>2026-01-01T00:00:00</StartBoundary>
+      <Enabled>true</Enabled>
+      <Repetition>
+        <Interval>PT30M</Interval>
+        <StopAtDurationEnd>false</StopAtDurationEnd>
+      </Repetition>
+    </TimeTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+
+    <!-- На батареї не стежимо: економія важливіша (див. коментар угорі) -->
+    <DisallowStartIfOnBatteries>true</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>true</StopIfGoingOnBatteries>
+
+    <!-- Пропустили прогін (батарея, сон, вимкнений комп) — надолужити одразу,
+         щойно з'явиться нагода, а не чекати наступних півгодини -->
+    <StartWhenAvailable>true</StartWhenAvailable>
+
+    <!-- Простій до стеження стосунку не має -->
+    <RunOnlyIfIdle>false</RunOnlyIfIdle>
+    <IdleSettings>
+      <StopOnIdleEnd>false</StopOnIdleEnd>
+      <RestartOnIdle>false</RestartOnIdle>
+    </IdleSettings>
+
+    <!-- Прогін триває ~1 хв; 15 — це запобіжник від зависань, не норма -->
+    <ExecutionTimeLimit>PT15M</ExecutionTimeLimit>
+
+    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <WakeToRun>false</WakeToRun>
+    <Hidden>false</Hidden>
+    <Enabled>true</Enabled>
+    <Priority>7</Priority>
+  </Settings>
+  <Actions Context="Author">
+    <!--
+      Явно cmd.exe з робочою текою, а не сам .bat у Command.
+      Так надійніше: Планувальник не покладається на асоціацію .bat, і
+      скрипт стартує вже в теці проєкту, не в system32.
+    -->
+    <Exec>
+      <Command>%windir%\System32\cmd.exe</Command>
+      <Arguments>/c "run-bookflea.bat"</Arguments>
+      <WorkingDirectory>__DIR__</WorkingDirectory>
+    </Exec>
+  </Actions>
+</Task>

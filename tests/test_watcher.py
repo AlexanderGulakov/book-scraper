@@ -629,3 +629,55 @@ def test_load_env_strips_a_trailing_comment(tmp_path, monkeypatch):
     monkeypatch.delenv("TELEGRAM_CHAT_ID", raising=False)
     app.load_env(env)
     assert app.os.environ["TELEGRAM_CHAT_ID"] == "-1003916485931"
+
+
+def test_bat_files_are_ascii_only():
+    """У .bat не має бути жодного не-ASCII байта.
+
+    cmd.exe перечитує .bat з байтового зміщення після кожної команди. Якщо
+    у файлі є багатобайтові символи, а десь усередині міняється кодова
+    сторінка (`chcp`), зміщення зсуваються: парсер ріже рядки `rem` навпіл і
+    намагається виконати їхні хвости. 2026-09-21 це три дні тримало стеження
+    вимкненим на одній із машин, поки на іншій усе працювало.
+
+    Весь текст українською живе в .py та README, де кодування передбачуване.
+    """
+    root = Path(__file__).resolve().parent.parent
+    offenders = {}
+    for bat in sorted(root.glob("*.bat")):
+        raw = bat.read_bytes()
+        bad = [i for i, byte in enumerate(raw) if byte > 127]
+        if bad:
+            offenders[bat.name] = len(bad)
+    assert not offenders, f"не-ASCII байти у .bat: {offenders}"
+
+
+def test_bat_files_do_not_switch_codepage():
+    """`chcp` у .bat — половина тієї ж пастки. Друга половина — не-ASCII."""
+    root = Path(__file__).resolve().parent.parent
+    guilty = []
+    for bat in sorted(root.glob("*.bat")):
+        for line in bat.read_text(encoding="ascii", errors="replace").splitlines():
+            stripped = line.strip().lower()
+            if stripped.startswith("rem") or stripped.startswith("::"):
+                continue  # згадка в коментарі — це попередження, а не виклик
+            if "chcp" in stripped:
+                guilty.append(f"{bat.name}: {line.strip()}")
+    assert not guilty, f"виклик chcp у .bat: {guilty}"
+
+
+def test_task_template_is_valid_and_parametrised():
+    """Шаблон завдання має бути валідним XML і містити рівно один __DIR__."""
+    import xml.etree.ElementTree as ET
+
+    root = Path(__file__).resolve().parent.parent
+    raw = (root / "bookflea-task.xml").read_text(encoding="utf-8")
+    assert raw.count("__DIR__") == 1, "плейсхолдер має бути рівно один"
+
+    tree = ET.fromstring(raw.replace("__DIR__", r"C:\somewhere\olx-watcher"))
+    ns = {"t": "http://schemas.microsoft.com/windows/2004/02/mit/task"}
+    assert tree.find(".//t:Exec/t:WorkingDirectory", ns).text.endswith("olx-watcher")
+    assert tree.find(".//t:Interval", ns).text == "PT30M"
+    # ноутбук: на батареї не стежимо, але пропущене надолужуємо
+    assert tree.find(".//t:DisallowStartIfOnBatteries", ns).text == "true"
+    assert tree.find(".//t:StartWhenAvailable", ns).text == "true"
