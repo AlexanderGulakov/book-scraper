@@ -344,10 +344,17 @@ def test_missing_from_page_one_is_not_a_sale(monkeypatch):
     import main as app, olx
     from models import Ad
 
+    # Дати рахуємо від «зараз», а не зашиваємо: із зашитими тест тихо протухав
+    # щодня і одного ранку падав через те, що змінилась дата, а не код.
+    from datetime import datetime, timedelta, timezone
+    now = datetime.now(timezone.utc)
+    missed = (now - timedelta(hours=2)).isoformat()
+    created = (now - timedelta(days=14)).isoformat()
+
     state = {"version": 1, "watches": {"w": {"seeded": True, "ads": {
-        "1": {"price": 200, "title": "Живе", "url": "https://www.olx.ua/d/1", "miss": "2026-09-19T10:00:00+00:00"},
-        "2": {"price": 300, "title": "Зняте", "url": "https://www.olx.ua/d/2", "miss": "2026-09-19T09:00:00+00:00",
-              "created": "2026-09-05T09:00:00+00:00"},
+        "1": {"price": 200, "title": "Живе", "url": "https://www.olx.ua/d/1", "miss": missed},
+        "2": {"price": 300, "title": "Зняте", "url": "https://www.olx.ua/d/2", "miss": missed,
+              "created": created},
     }}}}
     cfg = {"watches": [{"id": "w", "name": "Пошук"}]}
     monkeypatch.setattr(olx, "ad_state", lambda s, url, **k: "alive" if url.endswith("1") else "gone")
@@ -553,7 +560,8 @@ def test_recent_chats_collects_ids_from_updates(monkeypatch):
         {"message": {"chat": {"id": 111, "type": "private", "first_name": "Alex"}}},
         {"message": {"chat": {"id": 111, "type": "private", "first_name": "Alex"}}},
         {"channel_post": {"chat": {"id": -1001234567890, "type": "channel", "title": "Книжки"}}},
-        {"my_chat_member": {"chat": {"id": -900, "type": "group", "title": "Сімейний"}}},
+        {"my_chat_member": {"chat": {"id": -900, "type": "group", "title": "Сімейний"},
+                            "new_chat_member": {"status": "member"}}},
         {"poll": {"id": "нічого корисного"}},
     ]}
 
@@ -571,6 +579,9 @@ def test_recent_chats_collects_ids_from_updates(monkeypatch):
     chats = notify.recent_chats()
     assert [c["id"] for c in chats] == [111, -1001234567890, -900], "дублі згорнуті, порядок збережений"
     assert chats[0]["title"] == "Alex" and chats[1]["title"] == "Книжки"
+    # статус бота видно лише там, де Telegram його дає
+    assert chats[2]["status"] == "member" and chats[2]["via"] == "my_chat_member"
+    assert chats[0]["status"] is None
 
 
 def test_recent_chats_explains_a_telegram_refusal(monkeypatch):
@@ -587,3 +598,34 @@ def test_recent_chats_explains_a_telegram_refusal(monkeypatch):
 
     with pytest.raises(RuntimeError, match="webhook"):
         notify.recent_chats()
+
+
+def test_load_env_warns_when_environment_shadows_the_file(tmp_path, monkeypatch, caplog):
+    """Файл правильний, а процес бере старе значення — про це треба сказати."""
+    env = tmp_path / ".env"
+    env.write_text(
+        "TELEGRAM_CHAT_ID=-1003916485931  # OLX-books\n"
+        "TELEGRAM_BOT_TOKEN=222:новий\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "-100СТАРИЙ")
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "111:старий")
+
+    with caplog.at_level("WARNING"):
+        app.load_env(env)
+
+    text = caplog.text
+    assert "TELEGRAM_CHAT_ID" in text and "-100СТАРИЙ" in text and "-1003916485931" in text
+    assert "Remove-Item Env:TELEGRAM_CHAT_ID" in text
+    # значення токена не світиться в логах ні старе, ні нове
+    assert "111:старий" not in text and "222:новий" not in text and "***" in text
+    # середовище все одно головніше
+    assert app.os.environ["TELEGRAM_CHAT_ID"] == "-100СТАРИЙ"
+
+
+def test_load_env_strips_a_trailing_comment(tmp_path, monkeypatch):
+    env = tmp_path / ".env"
+    env.write_text("TELEGRAM_CHAT_ID=-1003916485931  # OLX-books\n", encoding="utf-8")
+    monkeypatch.delenv("TELEGRAM_CHAT_ID", raising=False)
+    app.load_env(env)
+    assert app.os.environ["TELEGRAM_CHAT_ID"] == "-1003916485931"
