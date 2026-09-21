@@ -20,6 +20,7 @@ from typing import Any
 
 import yaml
 
+import analytics
 import bookflea
 import notify
 import olx
@@ -35,6 +36,8 @@ REQUIRED_API = {
                "format_heartbeat", "format_watch_error"],
     "olx": ["build_session", "fetch_watch", "matches", "price_ok", "ad_state"],
     "bookflea": ["collect"],
+    "analytics": ["profiles", "verdict_for_ad", "build_report", "report_due",
+                  "mark_reported"],
 }
 
 
@@ -248,7 +251,8 @@ def _days_text(days: float | None) -> str:
 
 
 def sold_report(cfg: dict[str, Any], state: dict[str, Any], session: Any,
-                *, max_checks: int = 30, pause: float = 1.5) -> list[str]:
+                *, max_checks: int = 60, pause: float = 1.5,
+                max_age_days: float | None = 14, keep_days: float = 60) -> list[str]:
     """Перевіряє зниклі оголошення і звітує про ті, яких уже немає на сайті.
 
     Навіщо. Зняте оголошення — найкращий доступний сигнал «за цю ціну беруть».
@@ -267,12 +271,29 @@ def sold_report(cfg: dict[str, Any], state: dict[str, Any], session: Any,
              for i, w in enumerate(cfg["watches"])}
 
     # Кандидати: зниклі, найдавніше зниклі — першими.
+    #
+    # ⚠ Довгожителів у чергу не беремо. Оголошення, яке провисіло два тижні,
+    # уже відповіло на своє питання: за ці гроші його не беруть, і чи зняли
+    # його на п'ятнадцятий день — нецікаво. Але сортування «найдавніше зниклі
+    # першими» ставить саме їх на початок черги, і 60 перевірок за прогін
+    # витрачались би на них, поки свіжі оголошення чекають. Для статистики
+    # вони не пропадають: analytics бере їх з іншого боку — як тих, що лежать.
     candidates: list[tuple[str, str, dict[str, Any]]] = []
+    skipped_old = 0
     for key, ws in state["watches"].items():
         for ad_id, rec in (ws.get("ads") or {}).items():
-            if rec.get("miss") and str(rec.get("url") or "").find("olx.ua") >= 0:
-                candidates.append((key, ad_id, rec))
+            if not rec.get("miss") or "olx.ua" not in str(rec.get("url") or ""):
+                continue
+            if max_age_days is not None:
+                age = _age_days(rec, now_dt)
+                if age is not None and age > float(max_age_days):
+                    skipped_old += 1
+                    continue
+            candidates.append((key, ad_id, rec))
     candidates.sort(key=lambda c: str(c[2].get("miss")))
+    if skipped_old:
+        log.info("Звіт про зняті: пропустив %s оголошень старших за %s дн.",
+                 skipped_old, max_age_days)
 
     if not candidates:
         log.info("Звіт про зняті: перевіряти нема чого")
@@ -302,9 +323,13 @@ def sold_report(cfg: dict[str, Any], state: dict[str, Any], session: Any,
     if not sold:
         return []
 
+    # Історія — це і є паливо для аналітики, тож тримаємо її за датою, а не
+    # за кількістю: обрізання «останні 1000» в активний тиждень з'їдало б
+    # саме те вікно, по якому analytics рахує медіани.
     history = state.setdefault("sold", [])
     history.extend(sold)
-    del history[:-1000]                    # історія не росте вічно
+    cutoff = (now_dt - timedelta(days=float(keep_days))).isoformat()
+    state["sold"] = [s for s in history if str(s.get("gone") or "") >= cutoff][-5000:]
 
     by_watch: dict[str, list[dict[str, Any]]] = {}
     for s in sold:
@@ -334,6 +359,38 @@ def sold_report(cfg: dict[str, Any], state: dict[str, Any], session: Any,
     return ["\n".join(lines)]
 
 
+def _verdict(cfg: dict[str, Any], prof_map: dict[str, Any], watch_name: str,
+             ad: Any) -> str | None:
+    """Коментар до ціни для одного оголошення. Ніколи не валить прогін.
+
+    Аналітика — приємний додаток, а не умова роботи: якщо вона з якоїсь
+    причини впаде, сповіщення все одно має долетіти, просто без коментаря.
+    """
+    try:
+        return analytics.verdict_for_ad(ad, watch_name, cfg, prof_map)
+    except Exception as exc:  # noqa: BLE001
+        log.debug("Вердикт для %s не склався: %s", getattr(ad, "id", "?"), exc)
+        return None
+
+
+def daily_book_report(cfg: dict[str, Any], state: dict[str, Any]) -> list[str]:
+    """Раз на добу — один звіт «за скільки що беруть». Без мережі, лише стан."""
+    opt = {**analytics.DEFAULTS, **(cfg.get("defaults") or {})}
+    if not opt.get("analytics_enabled", True):
+        return []
+    if not analytics.report_due(state, opt):
+        return []
+    text = analytics.build_report(cfg, state, esc=notify.esc)
+    # Позначаємо день як відзвітований у будь-якому разі: інакше порожній
+    # звіт перевірявся б наново щопрогону до півночі.
+    analytics.mark_reported(state, opt)
+    if not text:
+        log.info("Денний звіт про ціни: висновків поки нема, мовчу")
+        return []
+    log.info("Денний звіт про ціни складено (%s символів)", len(text))
+    return [text]
+
+
 def heartbeat_due(opt: dict[str, Any], ws: dict[str, Any]) -> bool:
     """Чи час слати «живий» для цього watch'а.
 
@@ -357,6 +414,15 @@ def run(cfg: dict[str, Any], state: dict[str, Any], *, dry_run: bool,
     # два пошуки (напр. «кассандра клер» і «знаряддя смерті» перетинаються).
     # У стані кожного watch воно все одно записується окремо.
     announced: set[str] = set()
+
+    # Профілі цін рахуємо один раз на прогін — це чиста арифметика над станом,
+    # без жодного запиту в мережу. Далі кожне сповіщення про оголошення
+    # отримує з них коментар («Брати не думаючи» / «Задорого» / …).
+    try:
+        prof_map = analytics.profiles(cfg, state)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Не вдалось порахувати профілі цін: %s", exc)
+        prof_map = {}
 
     for idx, w in enumerate(cfg["watches"]):
         if w.get("enabled") is False:
@@ -464,7 +530,8 @@ def run(cfg: dict[str, Any], state: dict[str, Any], *, dry_run: bool,
 
             if prev is None:
                 if fits and not first_run and ad.id not in announced:
-                    messages.append(notify.format_event("new", name, ad))
+                    messages.append(notify.format_event(
+                        "new", name, ad, verdict=_verdict(cfg, prof_map, name, ad)))
                     announced.add(ad.id)
                     new_cnt += 1
             else:
@@ -477,7 +544,9 @@ def run(cfg: dict[str, Any], state: dict[str, Any], *, dry_run: bool,
                     and ad.price < old * (1 - threshold)
                 )
                 if dropped and ad.id not in announced:
-                    messages.append(notify.format_event("drop", name, ad, old_price=old))
+                    messages.append(notify.format_event(
+                        "drop", name, ad, old_price=old,
+                        verdict=_verdict(cfg, prof_map, name, ad)))
                     announced.add(ad.id)
                     drop_cnt += 1
 
@@ -536,11 +605,20 @@ def run(cfg: dict[str, Any], state: dict[str, Any], *, dry_run: bool,
         try:
             messages.extend(sold_report(
                 cfg, state, session,
-                max_checks=int(defaults.get("sold_report_max_checks", 30)),
+                max_checks=int(defaults.get("sold_report_max_checks", 60)),
+                max_age_days=defaults.get("sold_check_max_age_days", 14),
             ))
             state["sold_report_last"] = now
         except Exception as exc:  # noqa: BLE001
             log.warning("Звіт про зняті не склався: %s", exc)
+
+    # Раз на добу — аналітика цін. Вона рахується зі стану, тому нічого не
+    # питає в OLX і не залежить від того, чи вдався цей конкретний прогін.
+    if not dry_run:
+        try:
+            messages.extend(daily_book_report(cfg, state))
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Денний звіт про ціни не склався: %s", exc)
 
     if dry_run and messages:
         log.info("--dry-run: %s повідомлень НЕ надіслано:\n%s", len(messages), "\n---\n".join(messages))

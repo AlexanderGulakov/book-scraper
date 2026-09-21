@@ -101,8 +101,14 @@ class Email:
 SOURCE_LABEL = {"olx": "OLX", "bookflea": "Букфлі"}
 
 
-def format_event(kind: str, watch_name: str, ad, old_price: float | None = None) -> str:
-    """kind: 'new' | 'drop'"""
+def format_event(kind: str, watch_name: str, ad, old_price: float | None = None,
+                 verdict: str | None = None) -> str:
+    """kind: 'new' | 'drop'
+
+    `verdict` — коментар від analytics («🟢 Брати не думаючи», «🔴 Задорого»…).
+    Ставимо його одразу під ціною: саме там на нього дивляться, коли треба
+    вирішити за півсекунди, відкривати посилання чи гортати далі.
+    """
     where = SOURCE_LABEL.get(getattr(ad, "source", "olx"), "")
     tag = f"{esc(watch_name)}"
     if getattr(ad, "matched", None):
@@ -120,6 +126,9 @@ def format_event(kind: str, watch_name: str, ad, old_price: float | None = None)
         )
     else:
         head = f"🆕 <b>Нове оголошення</b> — {tag}\n💰 <b>{esc(ad.price_text)}</b>"
+
+    if verdict:
+        head += f"\n<b>{esc(verdict)}</b>"
 
     caption = esc(ad.title)
     if getattr(ad, "author", None):

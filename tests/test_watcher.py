@@ -349,7 +349,7 @@ def test_missing_from_page_one_is_not_a_sale(monkeypatch):
     from datetime import datetime, timedelta, timezone
     now = datetime.now(timezone.utc)
     missed = (now - timedelta(hours=2)).isoformat()
-    created = (now - timedelta(days=14)).isoformat()
+    created = (now - timedelta(days=5)).isoformat()
 
     state = {"version": 1, "watches": {"w": {"seeded": True, "ads": {
         "1": {"price": 200, "title": "Живе", "url": "https://www.olx.ua/d/1", "miss": missed},
@@ -367,7 +367,37 @@ def test_missing_from_page_one_is_not_a_sale(monkeypatch):
     assert "2" not in ads, "зняте прибрали зі стану"
     assert "miss" not in ads["1"], "живому скинули позначку"
     assert len(state["sold"]) == 1
-    assert 13 <= state["sold"][0]["days"] <= 15, "пролежало близько двох тижнів"
+    assert 4 <= state["sold"][0]["days"] <= 6, "пролежало близько п'яти днів"
+
+
+def test_longtimers_do_not_clog_the_check_queue(monkeypatch):
+    """Оголошення старші за `max_age_days` у чергу перевірок не беремо.
+
+    Черга сортується «найдавніше зниклі першими», тож без цього фільтра всі
+    60 перевірок за прогін діставались двотижневим лежням, а свіжі
+    оголошення — ті, чиє зникнення справді означає продаж, — чекали. Для
+    статистики довгожителі не губляться: analytics бачить їх з іншого боку.
+    """
+    import main as app, olx
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime.now(timezone.utc)
+    state = {"version": 1, "watches": {"w": {"seeded": True, "ads": {
+        "old": {"price": 900, "title": "Лежень", "url": "https://www.olx.ua/d/old",
+                "miss": (now - timedelta(days=9)).isoformat(),
+                "created": (now - timedelta(days=40)).isoformat()},
+        "new": {"price": 200, "title": "Свіже", "url": "https://www.olx.ua/d/new",
+                "miss": (now - timedelta(hours=1)).isoformat(),
+                "created": (now - timedelta(days=2)).isoformat()},
+    }}}}
+    cfg = {"watches": [{"id": "w", "name": "Пошук"}]}
+    monkeypatch.setattr(olx, "ad_state", lambda *a, **k: "gone")
+    monkeypatch.setattr(app.time, "sleep", lambda *_: None)
+
+    msgs = app.sold_report(cfg, state, None, max_checks=10, max_age_days=14)
+
+    assert len(msgs) == 1 and "Свіже" in msgs[0] and "Лежень" not in msgs[0]
+    assert "old" in state["watches"]["w"]["ads"], "лежня зі стану не чіпаємо"
 
 
 def test_report_shows_price_and_lifetime(monkeypatch):
@@ -386,7 +416,10 @@ def test_report_shows_price_and_lifetime(monkeypatch):
     monkeypatch.setattr(olx, "ad_state", lambda *a, **k: "gone")
     monkeypatch.setattr(app.time, "sleep", lambda *_: None)
 
-    text = app.sold_report(cfg, state, None)[0]
+    # max_age_days=None — бо саме тут перевіряється позначка довгожителя, а
+    # в бойовому конфізі такі оголошення до перевірки взагалі не доходять
+    # (див. test_longtimers_do_not_clog_the_check_queue).
+    text = app.sold_report(cfg, state, None, max_age_days=None)[0]
     assert "Медіана: <b>300 грн</b>" in text
     assert "⏳" in text, "довгожителя позначили — це міг бути не продаж"
     assert "150 UAH" in text and "дн." in text
