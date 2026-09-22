@@ -23,6 +23,7 @@ import analytics
 import bookflea
 import notify
 import olx
+import rules
 import storage
 
 log = logging.getLogger("main")
@@ -34,10 +35,12 @@ STATE_VERSION = storage.STATE_VERSION
 REQUIRED_API = {
     "notify": ["build_channels", "dispatch", "format_event", "format_test",
                "format_heartbeat", "format_watch_error"],
-    "olx": ["build_session", "fetch_watch", "matches", "price_ok", "ad_state"],
+    "olx": ["build_session", "fetch_watch", "matches", "price_ok", "ad_state",
+            "fetch_description"],
     "bookflea": ["collect"],
+    "rules": ["decide", "Decision", "is_russian_text"],
     "analytics": ["profiles", "verdict_for_ad", "build_report", "report_due",
-                  "mark_reported"],
+                  "mark_reported", "book_entry"],
     "storage": ["open_store", "empty_state", "JsonStore", "MongoStore"],
 }
 
@@ -115,6 +118,12 @@ def prune(watch_state: dict[str, Any], days: int) -> int:
     stale = [k for k, v in ads.items() if v.get("seen", "") < cutoff]
     for k in stale:
         del ads[k]
+    # Список відкинутих росте так само, як і самі оголошення, тож і забувається
+    # за тим самим правилом. Знята з продажу «Гарри Поттер» не має вічно
+    # займати місце у стані заради того, щоб ми її вдруге не перевірили.
+    refused = watch_state.get("dropped") or {}
+    for k in [k for k, v in refused.items() if str(v or "") < cutoff]:
+        del refused[k]
     return len(stale)
 
 
@@ -309,6 +318,9 @@ def sold_report(cfg: dict[str, Any], state: dict[str, Any], session: Any,
                 "price": rec.get("price"), "cur": rec.get("cur"),
                 "url": rec.get("url"), "days": None if days is None else round(days, 1),
                 "gone": now_dt.isoformat(),
+                # Прапорець їде далі разом з оголошенням: комплект, проданий
+                # за 900 грн, так само не описує ціну жодної окремої книжки.
+                **({"an": False} if rec.get("an") is False else {}),
             })
             state["watches"][key]["ads"].pop(ad_id, None)
         time.sleep(pause + random.uniform(0, 1))
@@ -431,6 +443,10 @@ def run(cfg: dict[str, Any], state: dict[str, Any], *, dry_run: bool,
         # Вимкнути спільний список для окремого watch: use_default_excludes: false
         shared = (defaults.get("exclude_keywords") or []) if opt.get("use_default_excludes", True) else []
         opt["exclude_keywords"] = list(dict.fromkeys(shared + (w.get("exclude_keywords") or [])))
+        # Те саме для стоп-слів шару правил: вони дивляться ще й в опис, тож
+        # спільний список («росмен») має додаватись, а не витіснятись власним.
+        opt["drop_keywords"] = list(dict.fromkeys(
+            (defaults.get("drop_keywords") or []) + (w.get("drop_keywords") or [])))
 
         ws = state["watches"].setdefault(key, {"seeded": False, "ads": {}})
 
@@ -502,50 +518,79 @@ def run(cfg: dict[str, Any], state: dict[str, Any], *, dry_run: bool,
         ]
         log.info("  знайдено %s, після фільтрів %s", len(ads), len(kept))
 
-        new_cnt = drop_cnt = 0
+        # Оголошення, які шар правил уже визнав чужими. Тримаємо самі id:
+        # без цього кожен прогін заново тягнув би опис російського видання,
+        # щоб удруге дійти того самого висновку.
+        refused: dict[str, Any] = ws.setdefault("dropped", {})
+        catalog = cfg.get("books") or []
+        desc_budget = int(opt.get("description_max_fetch", 30) or 0)
+        want_desc = bool(opt.get("needs_description"))
+
+        new_cnt = drop_cnt = skip_cnt = quiet_cnt = 0
         for ad in kept:
+            if ad.id in refused:
+                continue
             prev = known.get(ad.id)
-            # Комплект коштує дорожче за окрему книжку, тож у нього може бути
-            # власна межа: max_price_bundle. Без неї все по-старому.
-            cap = opt.get("max_price")
-            if opt.get("max_price_bundle") is not None and olx.is_bundle(
-                ad,
-                include=opt.get("include_keywords", []) or [],
-                bundle_keywords=opt.get("bundle_keywords", []) or [],
-            ):
-                cap = opt.get("max_price_bundle")
-            fits = olx.price_ok(
-                ad,
-                max_price=cap,
-                min_price=opt.get("min_price"),
-                currency=opt.get("currency", "UAH"),
-                allow_no_price=bool(opt.get("allow_no_price", False)),
-            )
+
+            # Валюта — окремо від решти правил: 220 zł не сміє пройти як 220 грн.
+            cur_want = opt.get("currency", "UAH")
+            if ad.price is not None and cur_want and (
+                    not ad.currency or ad.currency.upper() != str(cur_want).upper()):
+                refused[ad.id] = now
+                skip_cnt += 1
+                continue
+
+            entry = analytics.book_entry(ad.title, name, catalog)
+
+            # Опис дістаємо один раз за життя оголошення і кладемо в стан:
+            # він не змінюється, а коштує окремий запит.
+            desc = (prev or {}).get("desc")
+            if want_desc and desc is None and prev is None and desc_budget > 0:
+                desc = olx.fetch_description(session, ad.url)
+                desc_budget -= 1
+                time.sleep(1 + random.uniform(0, 1))
+
+            d = rules.decide(title=ad.title, price=ad.price, watch=opt,
+                             entry=entry, description=desc,
+                             include=opt.get("include_keywords", []) or [])
+
+            if d.action == "skip":
+                # Якщо оголошення колись було в базі, а тепер правила його
+                # відкинули (змінився конфіг) — прибираємо, щоб не тягнути
+                # сміття в статистику.
+                known.pop(ad.id, None)
+                refused[ad.id] = now
+                skip_cnt += 1
+                log.debug("  ✕ %s — %s", ad.title[:60], d.reason)
+                continue
 
             if prev is None:
-                if fits and not first_run and ad.id not in announced:
+                if d.notify and not first_run and ad.id not in announced:
                     messages.append(notify.format_event(
-                        "new", name, ad, verdict=_verdict(cfg, prof_map, name, ad)))
+                        "new", name, ad, verdict=_verdict(cfg, prof_map, name, ad),
+                        mark=d.tag))
                     announced.add(ad.id)
                     new_cnt += 1
+                elif not d.notify:
+                    quiet_cnt += 1
             else:
                 old = prev.get("price")
                 threshold = float(opt.get("min_drop_percent", 1)) / 100.0
-                dropped = (
-                    fits
+                cheaper = (
+                    d.notify
                     and old is not None
                     and ad.price is not None
                     and ad.price < old * (1 - threshold)
                 )
-                if dropped and ad.id not in announced:
+                if cheaper and ad.id not in announced:
                     messages.append(notify.format_event(
                         "drop", name, ad, old_price=old,
-                        verdict=_verdict(cfg, prof_map, name, ad)))
+                        verdict=_verdict(cfg, prof_map, name, ad), mark=d.tag))
                     announced.add(ad.id)
                     drop_cnt += 1
 
             prev = prev or {}
-            known[ad.id] = {
+            rec = {
                 "price": ad.price,
                 "cur": ad.currency,
                 "title": ad.title[:120],
@@ -556,6 +601,13 @@ def run(cfg: dict[str, Any], state: dict[str, Any], *, dry_run: bool,
                 "created": ad.created_time or prev.get("created"),
                 "first": prev.get("first") or now,
             }
+            if desc:
+                rec["desc"] = desc
+            if not d.analytics:
+                # Комплекти й оголошення без ціни: показати варто, рахувати
+                # по них медіану — ні.
+                rec["an"] = False
+            known[ad.id] = rec
 
         # Позначаємо, чого цього разу в видачі не було. Зникнення з першої
         # сторінки ще нічого не означає — свіжі оголошення виштовхують старі, —
@@ -571,7 +623,8 @@ def run(cfg: dict[str, Any], state: dict[str, Any], *, dry_run: bool,
             ws["seeded"] = True
             log.info("  перший запуск: запам'ятав %s оголошень, сповіщення не слав", len(kept))
         else:
-            log.info("  нових: %s, здешевлень: %s", new_cnt, drop_cnt)
+            log.info("  нових: %s, здешевлень: %s, мовчки в базу: %s, відкинуто: %s",
+                     new_cnt, drop_cnt, quiet_cnt, skip_cnt)
             # Знахідка сама по собі доводить, що скрапер живий, тож пульс
             # потрібен лише в порожній прогін.
             if not (new_cnt or drop_cnt) and heartbeat_due(opt, ws):

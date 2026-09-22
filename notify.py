@@ -101,13 +101,26 @@ class Email:
 SOURCE_LABEL = {"olx": "OLX", "bookflea": "Букфлі"}
 
 
+HEADLINE = {
+    # Чому не однаковий заголовок. «≥1000 грн» шлеться НЕ для того, щоб
+    # купити, а щоб бачити, скільки за цю книжку взагалі просять. Якщо таке
+    # повідомлення виглядає як знахідка, воно вчить гортати не читаючи — і
+    # справжня знахідка поїде туди ж.
+    "high": "💸 <b>Дорогий лот</b> (для оцінки ринку)",
+    "bundle": "📚 <b>Комплект</b>",
+}
+
+
 def format_event(kind: str, watch_name: str, ad, old_price: float | None = None,
-                 verdict: str | None = None) -> str:
+                 verdict: str | None = None, mark: str | None = None) -> str:
     """kind: 'new' | 'drop'
 
     `verdict` — коментар від analytics («🟢 Брати не думаючи», «🔴 Задорого»…).
     Ставимо його одразу під ціною: саме там на нього дивляться, коли треба
     вирішити за півсекунди, відкривати посилання чи гортати далі.
+
+    `mark` — чому оголошення взагалі приїхало, якщо це не звичайна знахідка
+    («high» — дорогий лот для оцінки ринку, «bundle» — комплект).
     """
     where = SOURCE_LABEL.get(getattr(ad, "source", "olx"), "")
     tag = f"{esc(watch_name)}"
@@ -125,7 +138,8 @@ def format_event(kind: str, watch_name: str, ad, old_price: float | None = None,
             f"  (−{esc(_fmt(delta, ad.currency))}, −{pct:.0f}%)"
         )
     else:
-        head = f"🆕 <b>Нове оголошення</b> — {tag}\n💰 <b>{esc(ad.price_text)}</b>"
+        title_line = HEADLINE.get(mark or "", "🆕 <b>Нове оголошення</b>")
+        head = f"{title_line} — {tag}\n💰 <b>{esc(ad.price_text)}</b>"
 
     if verdict:
         head += f"\n<b>{esc(verdict)}</b>"

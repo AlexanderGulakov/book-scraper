@@ -186,6 +186,46 @@ def price_ok(ad: Ad, *, max_price: float | None, min_price: float | None,
     return True
 
 
+# ------------------------------------------------------------------ опис
+
+def fetch_description(session: Fetcher, url: str, *, timeout: int = 20,
+                      limit: int = 1200) -> str | None:
+    """Опис оголошення зі сторінки або None, якщо не вдалось.
+
+    Навіщо. У видачі опису немає — лише заголовок, а заголовок бреше. Саме
+    в описі стоїть видавництво («Росмен» = російське видання) і те, що в
+    лоті кілька книжок, хоча в назві одна. Коштує це +1 запит, тому
+    викликається тільки для НОВИХ оголошень і тільки в тих watch'ах, де від
+    опису справді залежить рішення (`needs_description: true`).
+
+    None означає «не вдалось спитати», а не «опису немає»: викликач мусить
+    розрізняти ці випадки, інакше мережевий збій тихо перетвориться на
+    «видавництво не російське».
+    """
+    try:
+        status, body = session.get(url, timeout=timeout)
+    except Exception as exc:  # noqa: BLE001
+        log.debug("Не вдалось дістати опис %s: %s", url, exc)
+        return None
+    if status != 200:
+        return None
+    m = _STATE_RE.search(body)
+    if not m:
+        return None
+    try:
+        data = json.loads(json.loads(m.group(1)))
+    except ValueError:
+        return None
+    ad = (data.get("ad") or {}).get("ad") or data.get("ad") or {}
+    desc = ad.get("description")
+    if not isinstance(desc, str):
+        return None
+    # HTML з опису нам не потрібен — правила дивляться на слова.
+    text = re.sub(r"<[^>]+>", " ", desc)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text[:limit]
+
+
 # ------------------------------------------------------- чи оголошення ще живе
 
 def ad_state(session: Fetcher, url: str, *, timeout: int = 20) -> str:

@@ -171,6 +171,20 @@ def book_key(title: str, watch_name: str, **kw: Any) -> str:
     return book_match(title, watch_name, **kw)[0]
 
 
+def book_entry(title: str, watch_name: str,
+               catalog: Iterable[dict[str, Any]] = ()) -> dict[str, Any] | None:
+    """Сама позиція каталогу, а не лише її назва.
+
+    Потрібна `rules.py`: пороги Telegram і бази живуть саме в позиції книги
+    («Бот — до 500», «Прокляте дитя — до 180»), і без доступу до неї шар
+    правил довелося б дублювати логікою зіставлення.
+    """
+    for entry in catalog or ():
+        if _entry_matches(entry, title or "", watch_name):
+            return entry
+    return None
+
+
 # ------------------------------------------------------------ збір вибірок
 
 def _dt(raw: Any) -> datetime | None:
@@ -269,6 +283,10 @@ def collect(cfg: dict[str, Any], state: dict[str, Any], *,
         if w is None:
             continue
         title = str(rec.get("title") or "")
+        # `an: false` ставить шар правил (rules.py) — комплекти й оголошення
+        # без ціни. Вони варті повідомлення, але не медіани.
+        if rec.get("an") is False:
+            continue
         if not _usable(title, rec.get("price"), rec.get("cur"), w, opt):
             continue
         name, from_catalog = classify(title, wname, w)
@@ -290,6 +308,8 @@ def collect(cfg: dict[str, Any], state: dict[str, Any], *,
             if age is None or age < float(opt["stalled_days"]):
                 continue
             title = str(rec.get("title") or "")
+            if rec.get("an") is False:
+                continue
             if not _usable(title, rec.get("price"), rec.get("cur"), w, opt):
                 continue
             name, from_catalog = classify(title, wname, w)
