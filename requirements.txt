@@ -1,5 +1,8 @@
 requests>=2.31,<3
 PyYAML>=6.0,<7
+# Стан живе в MongoDB Atlas. dnspython іде в залежностях pymongo і потрібен
+# для рядків mongodb+srv:// — без нього Atlas не резолвиться.
+pymongo>=4.10,<5
 beautifulsoup4>=4.12,<5
 lxml>=6.0
 # Прикидається справжнім Chrome на рівні TLS — без цього OLX віддає 403

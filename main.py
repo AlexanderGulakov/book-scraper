@@ -8,7 +8,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import os
 import random
@@ -24,9 +23,10 @@ import analytics
 import bookflea
 import notify
 import olx
+import storage
 
 log = logging.getLogger("main")
-STATE_VERSION = 1
+STATE_VERSION = storage.STATE_VERSION
 
 
 # Що main.py очікує від сусідніх модулів. Перевіряється на старті, бо файли
@@ -38,6 +38,7 @@ REQUIRED_API = {
     "bookflea": ["collect"],
     "analytics": ["profiles", "verdict_for_ad", "build_report", "report_due",
                   "mark_reported"],
+    "storage": ["open_store", "empty_state", "JsonStore", "MongoStore"],
 }
 
 
@@ -98,21 +99,14 @@ def load_config(path: Path) -> dict[str, Any]:
     return cfg
 
 
+# Файлові load/save лишились як тонкі обгортки над storage.JsonStore: на них
+# спираються тести й звичка запускати `--storage json` локально.
 def load_state(path: Path) -> dict[str, Any]:
-    if not path.exists():
-        return {"version": STATE_VERSION, "watches": {}}
-    try:
-        state = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        log.warning("state.json пошкоджений — починаю з чистого стану")
-        return {"version": STATE_VERSION, "watches": {}}
-    state.setdefault("version", STATE_VERSION)
-    state.setdefault("watches", {})
-    return state
+    return storage.JsonStore(path).load()
 
 
 def save_state(path: Path, state: dict[str, Any]) -> None:
-    path.write_text(json.dumps(state, ensure_ascii=False, indent=1, sort_keys=True), encoding="utf-8")
+    storage.JsonStore(path).save(state)
 
 
 def prune(watch_state: dict[str, Any], days: int) -> int:
@@ -630,7 +624,12 @@ def run(cfg: dict[str, Any], state: dict[str, Any], *, dry_run: bool,
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", default="watches.yaml", type=Path)
-    ap.add_argument("--state", default="state.json", type=Path)
+    ap.add_argument("--state", default="state.json", type=Path,
+                    help="файл стану; використовується лише при --storage json")
+    ap.add_argument("--storage", default="auto", choices=("auto", "json", "mongo"),
+                    help="де тримати стан: auto (Mongo, якщо є MONGODB_URI), json, mongo")
+    ap.add_argument("--mongo-uri", default=None, help="інакше береться з MONGODB_URI")
+    ap.add_argument("--mongo-db", default=None, help="інакше з MONGODB_DB або olx_watcher")
     ap.add_argument("--only", action="append", default=[], metavar="WATCH",
                     help="перевіряти лише ці watch'і (ім'я, id або source; можна кілька разів)")
     ap.add_argument("--skip", action="append", default=[], metavar="WATCH",
@@ -699,7 +698,10 @@ def main() -> int:
         log.info("✔ Тестове повідомлення надіслано — канал працює")
         return 0
 
-    state = {"version": STATE_VERSION, "watches": {}} if args.reset else load_state(args.state)
+    store = storage.open_store(state_path=args.state, mode=args.storage,
+                               uri=args.mongo_uri, db_name=args.mongo_db)
+    log.info("Стан: %s", store.describe())
+    state = store.reset() if args.reset else store.load()
 
     gone = forget_orphans(cfg, state)
     if gone:
@@ -734,8 +736,9 @@ def main() -> int:
     if undelivered:
         log.error("Стан НЕ збережено: наступний прогін спробує надіслати ці ж події ще раз")
     else:
-        save_state(args.state, state)
-        log.info("Стан збережено в %s", args.state)
+        store.save(state)
+        log.info("Стан збережено: %s", store.describe())
+    store.close()
 
     # Не валимо workflow через тимчасову помилку мережі, якщо хоч щось спрацювало.
     if errors and errors >= max(len(selected), 1):

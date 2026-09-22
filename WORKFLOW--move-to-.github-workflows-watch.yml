@@ -21,8 +21,12 @@ concurrency:
   group: olx-watch
   cancel-in-progress: false
 
+# contents: write більше не потрібен — стан живе в MongoDB, а не в репо.
+# Раніше тут був крок «Commit state» з git pull --rebase і трьома спробами
+# push: саме він створював гонку з домашньою машиною і засмічував історію
+# комітом на кожен прогін.
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   watch:
@@ -47,6 +51,10 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          # Стан. Той самий рядок має бути в .env на домашній машині —
+          # інакше Букфлі й OLX знову опиняться в різних базах.
+          MONGODB_URI: ${{ secrets.MONGODB_URI }}
+          MONGODB_DB: ${{ vars.MONGODB_DB || 'olx_watcher' }}
           # Необов'язково — якщо хочете ще й e-mail:
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
           SMTP_PORT: ${{ secrets.SMTP_PORT }}
@@ -60,23 +68,10 @@ jobs:
           # --skip Букфлі: книгарня віддає каталог за IP клієнта, і з
           # американської адреси runner'а це польський ринок — чужі
           # оголошення в злотих. Букфлі крутиться вдома Планувальником
-          # Windows (run-bookflea.bat, окремий state.local.json).
-          python main.py --skip Букфлі ${{ inputs.mode == 'dry-run' && '--dry-run' || '' }}
-
-      - name: Commit state
-        if: always() && inputs.mode != 'probe'
-        run: |
-          git config user.name  "olx-watcher"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add state.json
-          if git diff --staged --quiet; then
-            echo "Змін у стані немає."
-            exit 0
-          fi
-          git commit -m "state: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          for i in 1 2 3; do
-            git pull --rebase --autostash origin "${GITHUB_REF_NAME}" && git push && exit 0
-            echo "push не вдався, спроба $i"
-            sleep 5
-          done
-          exit 1
+          # Windows (run-bookflea.bat), але пише вже в ТУ САМУ базу.
+          #
+          # --storage mongo, а не auto, навмисно: якщо секрет MONGODB_URI
+          # зникне, прогін має впасти з помилкою. Тихий відкат на файл
+          # означав би, що стан нікуди не зберігся, а наступний прогін
+          # вважав би всі оголошення новими — сорок повідомлень у Telegram.
+          python main.py --storage mongo --skip Букфлі ${{ inputs.mode == 'dry-run' && '--dry-run' || '' }}
