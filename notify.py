@@ -112,7 +112,8 @@ HEADLINE = {
 
 
 def format_event(kind: str, watch_name: str, ad, old_price: float | None = None,
-                 verdict: str | None = None, mark: str | None = None) -> str:
+                 verdict: str | None = None, mark: str | None = None,
+                 cheapest: dict | None = None) -> str:
     """kind: 'new' | 'drop'
 
     `verdict` — коментар від analytics («🟢 Брати не думаючи», «🔴 Задорого»…).
@@ -121,6 +122,9 @@ def format_event(kind: str, watch_name: str, ad, old_price: float | None = None,
 
     `mark` — чому оголошення взагалі приїхало, якщо це не звичайна знахідка
     («high» — дорогий лот для оцінки ринку, «bundle» — комплект).
+
+    `cheapest` — найдешевше живе оголошення на цю ж книжку (з
+    `analytics.cheapest_now`), щоб ціну було з чим порівняти одразу.
     """
     where = SOURCE_LABEL.get(getattr(ad, "source", "olx"), "")
     tag = f"{esc(watch_name)}"
@@ -154,7 +158,32 @@ def format_event(kind: str, watch_name: str, ad, old_price: float | None = None,
         meta.append("торг")
     if meta:
         bits.append("📍 " + esc(" · ".join(meta)))
+
+    line = format_cheapest(cheapest, ad)
+    if line:
+        bits.append(line)
     return "\n".join(bits)
+
+
+def format_cheapest(cheapest: dict | None, ad) -> str:
+    """Рядок «найдешевше зараз» під оголошенням.
+
+    Сенс у порівнянні: «300 грн» саме по собі не каже нічого, а «300 грн, а
+    поруч лежить за 180» — каже все. Якщо дешевше немає, так і пишемо: це теж
+    відповідь, і саме та, заради якої варто відкривати посилання.
+    """
+    if not cheapest or cheapest.get("price") is None:
+        return ""
+    price = float(cheapest["price"])
+    mine = ad.price
+    if str(cheapest.get("id") or "") == str(getattr(ad, "id", "")) or \
+            (mine is not None and price >= mine):
+        return "🔻 <i>Дешевше на зараз немає</i>"
+    label = esc(_fmt(price, ad.currency))
+    url = cheapest.get("url")
+    if url:
+        return f"🔻 Найдешевше зараз: <a href=\"{esc(url)}\">{label}</a>"
+    return f"🔻 Найдешевше зараз: {label}"
 
 
 def format_heartbeat(watch_name: str, *, keywords: int, seen: int, kept: int,

@@ -34,13 +34,13 @@ STATE_VERSION = storage.STATE_VERSION
 # копіюються на домашню машину руками й легко оновити не всі.
 REQUIRED_API = {
     "notify": ["build_channels", "dispatch", "format_event", "format_test",
-               "format_heartbeat", "format_watch_error"],
+               "format_heartbeat", "format_watch_error", "format_cheapest"],
     "olx": ["build_session", "fetch_watch", "matches", "price_ok", "ad_state",
             "fetch_description"],
     "bookflea": ["collect"],
     "rules": ["decide", "Decision", "is_russian_text"],
     "analytics": ["profiles", "verdict_for_ad", "build_report", "report_due",
-                  "mark_reported", "book_entry"],
+                  "mark_reported", "book_entry", "cheapest_now"],
     "storage": ["open_store", "empty_state", "JsonStore", "MongoStore"],
 }
 
@@ -379,6 +379,24 @@ def _verdict(cfg: dict[str, Any], prof_map: dict[str, Any], watch_name: str,
         return None
 
 
+def _cheapest(cfg: dict[str, Any], cheap_map: dict[str, Any], watch_name: str,
+              ad: Any) -> dict[str, Any] | None:
+    """Найдешевше живе оголошення на ту саму книжку. Теж не валить прогін."""
+    if not cheap_map:
+        return None
+    try:
+        w = next((x for x in cfg["watches"] if (x.get("name") or "") == watch_name), {})
+        key = analytics.book_key(
+            getattr(ad, "title", "") or "", watch_name,
+            catalog=cfg.get("books") or [],
+            include=w.get("include_keywords") or [],
+            bundle_keywords=w.get("bundle_keywords") or [])
+        return cheap_map.get(key)
+    except Exception as exc:  # noqa: BLE001
+        log.debug("Мінімум для %s не склався: %s", getattr(ad, "id", "?"), exc)
+        return None
+
+
 def daily_book_report(cfg: dict[str, Any], state: dict[str, Any]) -> list[str]:
     """Раз на добу — один звіт «за скільки що беруть». Без мережі, лише стан."""
     opt = {**analytics.DEFAULTS, **(cfg.get("defaults") or {})}
@@ -429,6 +447,20 @@ def run(cfg: dict[str, Any], state: dict[str, Any], *, dry_run: bool,
     except Exception as exc:  # noqa: BLE001
         log.warning("Не вдалось порахувати профілі цін: %s", exc)
         prof_map = {}
+
+    # Найдешевше живе оголошення на кожну книжку — теж чиста арифметика над
+    # станом. Підписує кожне сповіщення поточним мінімумом, щоб ціну було з
+    # чим порівняти, не відкриваючи OLX.
+    try:
+        cheap_map = analytics.cheapest_now(cfg, state)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Не вдалось порахувати найдешевші ціни: %s", exc)
+        cheap_map = {}
+
+    # Бюджет описів — НА ПРОГІН, а не на watch. Двадцять один watch по тридцять
+    # описів кожен — це шістсот зайвих запитів у найгіршому випадку, тобто
+    # надійний спосіб познайомитись з анти-ботом.
+    desc_left = [int((defaults.get("description_max_fetch") or 0))]
 
     for idx, w in enumerate(cfg["watches"]):
         if w.get("enabled") is False:
@@ -523,8 +555,10 @@ def run(cfg: dict[str, Any], state: dict[str, Any], *, dry_run: bool,
         # щоб удруге дійти того самого висновку.
         refused: dict[str, Any] = ws.setdefault("dropped", {})
         catalog = cfg.get("books") or []
-        desc_budget = int(opt.get("description_max_fetch", 30) or 0)
-        want_desc = bool(opt.get("needs_description"))
+        # Опис уміє діставати лише парсер OLX. Букфлі віддає свій опис у видачі
+        # й іншою розміткою, тож зайвий запит туди — це витрачений час і нуль
+        # користі: `fetch_description` не знайде там __PRERENDERED_STATE__.
+        want_desc = bool(opt.get("needs_description")) and source == "olx"
 
         new_cnt = drop_cnt = skip_cnt = quiet_cnt = 0
         for ad in kept:
@@ -545,9 +579,9 @@ def run(cfg: dict[str, Any], state: dict[str, Any], *, dry_run: bool,
             # Опис дістаємо один раз за життя оголошення і кладемо в стан:
             # він не змінюється, а коштує окремий запит.
             desc = (prev or {}).get("desc")
-            if want_desc and desc is None and prev is None and desc_budget > 0:
+            if want_desc and desc is None and prev is None and desc_left[0] > 0:
                 desc = olx.fetch_description(session, ad.url)
-                desc_budget -= 1
+                desc_left[0] -= 1
                 time.sleep(1 + random.uniform(0, 1))
 
             d = rules.decide(title=ad.title, price=ad.price, watch=opt,
@@ -568,7 +602,7 @@ def run(cfg: dict[str, Any], state: dict[str, Any], *, dry_run: bool,
                 if d.notify and not first_run and ad.id not in announced:
                     messages.append(notify.format_event(
                         "new", name, ad, verdict=_verdict(cfg, prof_map, name, ad),
-                        mark=d.tag))
+                        mark=d.tag, cheapest=_cheapest(cfg, cheap_map, name, ad)))
                     announced.add(ad.id)
                     new_cnt += 1
                 elif not d.notify:
@@ -585,7 +619,8 @@ def run(cfg: dict[str, Any], state: dict[str, Any], *, dry_run: bool,
                 if cheaper and ad.id not in announced:
                     messages.append(notify.format_event(
                         "drop", name, ad, old_price=old,
-                        verdict=_verdict(cfg, prof_map, name, ad), mark=d.tag))
+                        verdict=_verdict(cfg, prof_map, name, ad), mark=d.tag,
+                        cheapest=_cheapest(cfg, cheap_map, name, ad)))
                     announced.add(ad.id)
                     drop_cnt += 1
 

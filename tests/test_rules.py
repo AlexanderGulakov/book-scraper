@@ -184,3 +184,74 @@ def test_high_marker_alone_does_not_open_the_cheap_gate():
     w = {"max_price": 2000, "notify_min_price_high": 1000}
     assert rules.decide(title="х", price=100, watch=w).action == "store"
     assert rules.decide(title="х", price=1500, watch=w).tag == "high"
+
+
+# ─────────────────────────────────────────────── мова оголошення
+
+KING = {"max_price": 2000, "silent_russian": True, "drop_english": True}
+
+RU_DESC = ("Продам книгу в отличном состоянии, издательство АСТ, 480 страниц, "
+           "твердый переплет. Отправка Новой почтой по предоплате.")
+EN_DESC = ("Stephen King, Black House. Hardcover, first edition, very good "
+           "condition. Shipping available across the country by post.")
+UA_DESC = ("Продам книжку у гарному стані, видавництво КСД, тверда палітурка. "
+           "Надсилаю Новою поштою по всій Україні.")
+
+
+def test_russian_ad_is_kept_for_history_but_never_sent():
+    """Кінг і Ріггз російською трапляються постійно: ціну ринку вони таки
+    показують, а в Telegram їм робити нічого."""
+    d = rules.decide(title="Стівен Кінг Безсоння", description=RU_DESC,
+                     price=195, watch=KING)
+    assert d.action == "store"
+    assert not d.notify and d.store
+
+
+def test_english_ad_is_not_kept_at_all():
+    """Ціни на англійські видання живуть своїм життям і зсувають медіану."""
+    d = rules.decide(title="Black House Stephen King Чорний дім Стівен Кінг",
+                     description=EN_DESC, price=400, watch=KING)
+    assert d.action == "skip"
+
+
+def test_bilingual_title_with_ukrainian_description_survives():
+    """Пів заголовка англійською — норма для української книгарні."""
+    d = rules.decide(title="Black House Stephen King Чорний дім Стівен Кінг",
+                     description=UA_DESC, price=400, watch=KING)
+    assert d.notify
+
+
+def test_english_check_needs_a_long_enough_text():
+    """Два англійські слова в назві — це ще не англомовне видання."""
+    d = rules.decide(title="Stephen King", description=None, price=300, watch=KING)
+    assert d.action != "skip"
+
+
+# ─────────────────────────────────────────────── комплект із власним порогом
+
+STAND = {"name": "Кінг: Протистояння", "any": ["протистояння"],
+         "notify_max": 350, "notify_max_bundle": 700}
+
+
+def test_the_stand_single_volume_threshold():
+    assert rules.decide(title="Стівен Кінг Протистояння том I", price=340,
+                        watch=KING, entry=STAND).notify
+    assert not rules.decide(title="Стівен Кінг Протистояння том I", price=500,
+                            watch=KING, entry=STAND).notify
+
+
+def test_the_stand_two_volume_set_gets_the_double_threshold():
+    """«2 книги, томи I–II» за 1700 — мовчимо; ті самі два томи за 690 — пишемо."""
+    cheap = rules.decide(title="Стівен Кінг «Протистояння» — 2 книги, томи I–II",
+                         price=690, watch=KING, entry=STAND)
+    dear = rules.decide(title="Стівен Кінг «Протистояння» — 2 книги, томи I–II",
+                        price=1700, watch=KING, entry=STAND)
+    assert cheap.notify
+    assert not dear.notify
+    assert dear.store          # статистику по продажах збираємо все одно
+
+
+def test_foundation_sends_everything_including_ads_without_a_price():
+    w = {"max_price": 100000, "notify_max_price": 100000, "allow_no_price": True}
+    assert rules.decide(title="Азімов Фундація", price=1500, watch=w).notify
+    assert rules.decide(title="Азімов Фундація обмін", price=None, watch=w).notify

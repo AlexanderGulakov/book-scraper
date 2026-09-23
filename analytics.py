@@ -323,6 +323,56 @@ def collect(cfg: dict[str, Any], state: dict[str, Any], *,
     return books
 
 
+def cheapest_now(cfg: dict[str, Any], state: dict[str, Any], *,
+                 now: datetime | None = None) -> dict[str, dict[str, Any]]:
+    """Найдешевше ЖИВЕ оголошення на кожну книжку: {ключ книги: {price,url,title,id}}.
+
+    Навіщо. Саме по собі «нове оголошення за 300 грн» нічого не каже: може, це
+    найдешевше на ринку, а може, поруч лежить таке саме за 180. Цей індекс
+    дозволяє підписати кожне сповіщення поточним мінімумом і посиланням на
+    нього.
+
+    Рахується зі стану, **без жодного запиту в OLX** — тому не залежить від
+    того, чи вдався конкретний прогін, і не коштує нічого.
+
+    Що не бере:
+    - оголошення, яких давно не бачили у видачі (`stalled_seen_hours`): мертве
+      посилання гірше за відсутність рядка;
+    - усе, що шар правил позначив `an: false` — комплекти й лоти. Порівнювати
+      ціну однієї книжки з ціною набору безглуздо;
+    - російськомовні й гуртові лоти — тим самим фільтром, що й статистика.
+    """
+    opt = _opts(cfg)
+    watches = _watch_index(cfg)
+    catalog = cfg.get("books") or []
+    now = now or datetime.now(timezone.utc)
+    fresh_after = now - timedelta(hours=float(opt["stalled_seen_hours"]))
+
+    best: dict[str, dict[str, Any]] = {}
+    for wname, ws in (state.get("watches") or {}).items():
+        w = watches.get(wname)
+        if w is None:
+            continue
+        for ad_id, rec in (ws.get("ads") or {}).items():
+            if rec.get("an") is False:
+                continue
+            seen = _dt(rec.get("seen"))
+            if seen is None or seen < fresh_after:
+                continue
+            title = str(rec.get("title") or "")
+            if not _usable(title, rec.get("price"), rec.get("cur"), w, opt):
+                continue
+            name = book_key(title, wname, catalog=catalog,
+                            include=w.get("include_keywords") or [],
+                            bundle_keywords=w.get("bundle_keywords") or [])
+            price = float(rec["price"])
+            cur = best.get(name)
+            if cur is None or price < cur["price"]:
+                best[name] = {"price": price, "url": rec.get("url"),
+                              "title": title, "id": str(ad_id)}
+    return best
+
+
 # ------------------------------------------------------------------- профілі
 
 def quantile(values: list[float], q: float) -> float | None:
