@@ -310,3 +310,29 @@ def test_real_russian_publisher_still_caught():
                                     rules.RUSSIAN_PUBLISHERS) == "аст"
     assert rules.mentions_publisher("Відьмак Вежа Ластівки Сапковський",
                                     rules.RUSSIAN_PUBLISHERS) is None
+
+
+# ─────────────────────────────────────────────── правила на ключове слово
+
+def test_keyword_rules_narrow_one_keyword_only():
+    """Реальний випадок 2026-09-24: з Букфлі прилетів «Щоденник кілера» Денні
+    Кінга, бо ключове слово було просто «Кінг». Обмеження мусить лягати саме
+    на це слово — include_keywords watch'а вбив би заразом Кідрука й Ріггза."""
+    import main
+    from models import Ad
+
+    rules_cfg = {"Стівен Кінг": {"include": ["талісман", "безсоння"]}}
+
+    def ad(title, author, matched):
+        a = Ad(id="1", title=title, url="", price=100, currency="UAH",
+               price_text="", author=author, source="bookflea")
+        a.matched = matched
+        return a
+
+    # чужий Кінг взагалі не дійде: слово тепер «Стівен Кінг»
+    assert main.keyword_ok(ad("Талісман", "Стівен Кінг", "Стівен Кінг"), rules_cfg)
+    assert not main.keyword_ok(ad("Сяйво", "Стівен Кінг", "Стівен Кінг"), rules_cfg)
+    # інші ключові слова правило не чіпає
+    assert main.keyword_ok(ad("Зазирни у мої сни", "Макс Кідрук", "Кідрук"), rules_cfg)
+    # OLX-оголошення (matched=None) проходить завжди
+    assert main.keyword_ok(ad("Будь-що", None, None), rules_cfg)

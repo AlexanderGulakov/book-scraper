@@ -42,7 +42,22 @@ RUSSIAN_WORDS = [
 # інакше, тож хибного спрацювання бути не може).
 RUSSIAN_SUBSTRINGS = ["издательств", "переплет", "состояние", "страниц"]
 
-# Видавництва, які видають російською. Шукається і в заголовку, і в описі.
+# Прямі вказівки на англомовне видання. Українське оголошення пише саме так:
+# «англійською», «англомовне видання», «на англійській». Форми «англійської»
+# тут свідомо НЕМАЄ: «переклад з англійської» стоїть у половині описів
+# українських видань, і корінь «англ» відрізав би їх усі.
+ENGLISH_MARKERS = [
+    "англійською", "англомовн", "на англійській", "англійською мовою",
+    "in english", "english edition", "англ. мов", "(англ)", "(eng)",
+]
+
+# Видавництва, які видають російською. Звіряються ЦІЛИМ СЛОВОМ, а не підрядком.
+#
+# Чому це важливо. Спершу тут лежало голе «аст» (видавництво АСТ) і бралось
+# підрядком — а «аст» сидить усередині «п'яТА ЧАСТина», «ластівка», «майстер».
+# Через це тихо загинуло оголошення «Гаррі Поттер і Орден Фенікса» за 220 грн:
+# в описі стояло «п'ята частина пригод». Три літери підрядком — це не фільтр,
+# це рулетка.
 RUSSIAN_PUBLISHERS = ["росмен", "росмэн", "rosman", "махаон", "эксмо", "аст"]
 
 
@@ -75,6 +90,26 @@ def _opt(entry: dict[str, Any] | None, watch: dict[str, Any], key: str,
 
 def has_russian_letters(text: str) -> bool:
     return any(ch in RUSSIAN_LETTERS for ch in (text or "").casefold())
+
+
+def mentions_publisher(text: str, publishers: Iterable[str]) -> str | None:
+    """Назва видавництва в тексті — цілим словом. Повертає знайдене або None.
+
+    Багатослівні назви («видавництво аст») звіряються підрядком: там зайвих
+    збігів не буває. Односкладові — тільки як окреме слово.
+    """
+    t = (text or "").casefold()
+    tokens = {tok for tok in re.split(r"[^\w']+", t) if tok}
+    for pub in publishers or ():
+        if not pub:
+            continue
+        p = pub.casefold()
+        if " " in p or len(p) > 6:
+            if p in t:
+                return pub
+        elif p in tokens:
+            return pub
+    return None
 
 
 def is_russian_text(text: str, *, words: Iterable[str] = (),
@@ -115,13 +150,22 @@ def letter_mix(text: str) -> tuple[int, float]:
     return total, (lat / total if total else 0.0)
 
 
-def is_english_text(text: str, *, min_letters: int = 40, share: float = 0.75) -> bool:
-    """Чи текст англомовний.
+def is_english_text(text: str, *, min_letters: int = 40, share: float = 0.75,
+                    markers: Iterable[str] = ()) -> bool:
+    """Чи текст англомовний — за прямою вказівкою або за часткою латиниці.
 
-    Поріг високий і мінімальна довжина велика навмисне: короткий заголовок з
-    двох англійських слів — це звичайна українська книгарня, а не англомовне
-    видання. А от опис на сорок латинських літер поспіль — уже видання.
+    Одного підрахунку літер не досить, і це коштувало двох пропущених
+    оголошень: «Гаррі Поттер і філософський камінь англійською» описане
+    УКРАЇНСЬКОЮ — продавець просто каже, якою мовою книжка. Латиниці в такому
+    описі нуль, а видання англійське.
+
+    Тому спершу прямі маркери, і лише потім частка латиниці. Поріг частки
+    високий навмисне: два англійські слова в назві — це звичайна українська
+    книгарня, а не англомовне видання.
     """
+    t = (text or "").casefold()
+    if any(m.casefold() in t for m in (markers or ENGLISH_MARKERS) if m):
+        return True
     total, lat = letter_mix(text)
     return total >= min_letters and lat >= share
 
@@ -187,18 +231,21 @@ def decide(*, title: str, price: float | None, watch: dict[str, Any],
             return Decision("skip", reason="російськомовний заголовок")
         if description and is_russian_text(description):
             return Decision("skip", reason="російськомовний опис")
-        for pub in list(_opt(entry, watch, "russian_publishers",
-                             default=RUSSIAN_PUBLISHERS) or []):
-            if pub and pub.casefold() in hay.casefold():
-                return Decision("skip", reason=f"російське видавництво «{pub}»")
+        pub = mentions_publisher(hay, _opt(entry, watch, "russian_publishers",
+                                           default=RUSSIAN_PUBLISHERS) or [])
+        if pub:
+            return Decision("skip", reason=f"російське видавництво «{pub}»")
 
     # 3б. Англомовне — те саме, але розпізнається інакше (див. is_english_text).
     if _opt(entry, watch, "drop_english", default=False):
-        if description and is_english_text(description):
+        markers = _opt(entry, watch, "english_markers", default=ENGLISH_MARKERS) or ()
+        if description and is_english_text(description, markers=markers):
             return Decision("skip", reason="англомовний опис")
-        # Без опису дивимось на заголовок, але значно суворіше: двомовний
-        # заголовок («Black House Stephen King Чорний дім») — це норма.
-        if not description and is_english_text(title, min_letters=20, share=0.95):
+        # Заголовок перевіряємо ЗАВЖДИ, а не лише без опису: «Гаррі Поттер і
+        # філософський камінь англійською» має цілком український опис.
+        # Порогова частка латиниці тут вища (0.8), бо двомовний заголовок
+        # («Black House Stephen King Чорний дім») — це норма.
+        if is_english_text(title, min_letters=25, share=0.8, markers=markers):
             return Decision("skip", reason="англомовний заголовок")
 
     # 4. Комплект. Дивимось і заголовок, і опис.

@@ -253,8 +253,59 @@ def _days_text(days: float | None) -> str:
     return f"{days:.0f} дн."
 
 
+def _check_alive(batch: list[tuple[str, str, dict[str, Any]]], session: Any, *,
+                 workers: int, pause: float) -> list[str]:
+    """['alive' | 'gone' | 'unknown', …] у тому ж порядку, що й `batch`.
+
+    Стан тут НЕ змінюється: потоки лише ходять у мережу, а всі правки стану
+    робить викликач на головному потоці. Інакше два потоки одночасно видаляли б
+    з одного словника.
+
+    ⚠ Сесію між потоками ділити НЕ можна: curl_cffi тримає всередині один
+    curl-хендл, і паралельні запити з нього — гонка. Тому сесій рівно стільки,
+    скільки потоків, і кожна дістається рівно одному завданню за раз. Перша —
+    та, що прийшла ззовні: вона вже прогріта, і другий раз платити за це немає
+    за що.
+    """
+    if workers <= 1 or len(batch) <= 1:
+        out = []
+        for i, (_k, _a, rec) in enumerate(batch):
+            out.append(olx.ad_state(session, rec["url"]))
+            if i + 1 < len(batch):
+                time.sleep(pause + random.uniform(0, 1))
+        return out
+
+    import queue
+    from concurrent.futures import ThreadPoolExecutor
+
+    pool_size = min(workers, len(batch))
+    sessions: queue.Queue = queue.Queue()
+    sessions.put(session)
+    for _ in range(pool_size - 1):
+        s = olx.build_session()
+        try:
+            s.warmup()
+        except Exception:  # noqa: BLE001 — прогрів не критичний
+            pass
+        sessions.put(s)
+
+    def one(item: tuple[str, str, dict[str, Any]]) -> str:
+        sess = sessions.get()
+        try:
+            verdict = olx.ad_state(sess, item[2]["url"])
+        finally:
+            # Пауза ДО повернення сесії в чергу: так сумарна частота виходить
+            # workers/pause, а не «скільки встигне процесор».
+            time.sleep(pause + random.uniform(0, 1))
+            sessions.put(sess)
+        return verdict
+
+    with ThreadPoolExecutor(max_workers=pool_size) as pool:
+        return list(pool.map(one, batch))
+
+
 def sold_report(cfg: dict[str, Any], state: dict[str, Any], session: Any,
-                *, max_checks: int = 60, pause: float = 1.5,
+                *, max_checks: int = 60, pause: float = 1.5, workers: int = 4,
                 max_age_days: float | None = 14, keep_days: float = 60) -> list[str]:
     """Перевіряє зниклі оголошення і звітує про ті, яких уже немає на сайті.
 
@@ -306,8 +357,18 @@ def sold_report(cfg: dict[str, Any], state: dict[str, Any], session: Any,
 
     sold: list[dict[str, Any]] = []
     checked = 0
-    for key, ad_id, rec in candidates[:max_checks]:
-        verdict = olx.ad_state(session, rec["url"])
+    batch = candidates[:max_checks]
+
+    # Перевірки незалежні одна від одної: кожна — це GET сторінки оголошення,
+    # який нічого не знає про решту. Послідовно вони коштували ~2 с × 60 = дві
+    # хвилини, і саме вони робили годинний прогін уп'ятеро довшим за звичайний.
+    #
+    # ⚠ Сесію між потоками ділити НЕ можна: curl_cffi тримає всередині
+    # один curl-хендл, і паралельні запити з нього — гонка. Тому в кожного
+    # потоку власна сесія, створена один раз на потік.
+    verdicts = _check_alive(batch, session, workers=workers, pause=pause)
+
+    for (key, ad_id, rec), verdict in zip(batch, verdicts):
         checked += 1
         if verdict == "alive":
             rec.pop("miss", None)          # просто злетіло з першої сторінки
@@ -323,7 +384,6 @@ def sold_report(cfg: dict[str, Any], state: dict[str, Any], session: Any,
                 **({"an": False} if rec.get("an") is False else {}),
             })
             state["watches"][key]["ads"].pop(ad_id, None)
-        time.sleep(pause + random.uniform(0, 1))
 
     log.info("Звіт про зняті: перевірено %s, знято %s", checked, len(sold))
     if not sold:
@@ -723,6 +783,7 @@ def run(cfg: dict[str, Any], state: dict[str, Any], *, dry_run: bool,
                 cfg, state, session,
                 max_checks=int(defaults.get("sold_report_max_checks", 60)),
                 pause=float(defaults.get("sold_report_pause", 1.5)),
+                workers=int(defaults.get("sold_report_workers", 4)),
                 max_age_days=defaults.get("sold_check_max_age_days", 14),
             ))
             state["sold_report_last"] = now
