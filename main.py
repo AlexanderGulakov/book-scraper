@@ -379,6 +379,25 @@ def _verdict(cfg: dict[str, Any], prof_map: dict[str, Any], watch_name: str,
         return None
 
 
+def keyword_ok(ad: Any, rules: dict[str, Any]) -> bool:
+    """Правило на ОКРЕМЕ ключове слово watch'а (поки що лише Букфлі).
+
+    Навіщо. У Букфлі одне ключове слово = один запит, тому вигідно шукати за
+    прізвищем автора — воно ловить усі його книжки одразу. Але з Кінга
+    потрібні дев'ять конкретних назв, а не все підряд, і `include_keywords`
+    watch'а тут не годиться: він застосувався б і до Кідрука, і до Ріггза,
+    і до Гаррі Поттера.
+
+    `ad.matched` каже, яке саме слово спрацювало, тож обмеження вішається
+    точково на нього.
+    """
+    rule = rules.get(str(getattr(ad, "matched", "") or ""))
+    if not rule:
+        return True
+    return olx.matches(ad, include=rule.get("include") or [],
+                       exclude=rule.get("exclude") or [])
+
+
 def _cheapest(cfg: dict[str, Any], cheap_map: dict[str, Any], watch_name: str,
               ad: Any) -> dict[str, Any] | None:
     """Найдешевше живе оголошення на ту саму книжку. Теж не валить прогін."""
@@ -548,6 +567,12 @@ def run(cfg: dict[str, Any], state: dict[str, Any], *, dry_run: bool,
                 allow_similar=bool(opt.get("allow_similar", False)),
             )
         ]
+        krules = opt.get("keyword_rules") or {}
+        if krules:
+            narrowed = [a for a in kept if keyword_ok(a, krules)]
+            if len(narrowed) != len(kept):
+                log.info("  правила ключових слів відсіяли %s", len(kept) - len(narrowed))
+            kept = narrowed
         log.info("  знайдено %s, після фільтрів %s", len(ads), len(kept))
 
         # Оголошення, які шар правил уже визнав чужими. Тримаємо самі id:
@@ -582,7 +607,11 @@ def run(cfg: dict[str, Any], state: dict[str, Any], *, dry_run: bool,
             if want_desc and desc is None and prev is None and desc_left[0] > 0:
                 desc = olx.fetch_description(session, ad.url)
                 desc_left[0] -= 1
-                time.sleep(1 + random.uniform(0, 1))
+                # Сторінка оголошення легша за сторінку пошуку, тож і пауза
+                # менша: при сорока описах за прогін кожна зайва секунда — це
+                # сорок секунд життя воркфлоу.
+                time.sleep(float(defaults.get("description_pause", 0.4))
+                           + random.uniform(0, 0.6))
 
             d = rules.decide(title=ad.title, price=ad.price, watch=opt,
                              entry=entry, description=desc,
@@ -677,8 +706,13 @@ def run(cfg: dict[str, Any], state: dict[str, Any], *, dry_run: bool,
         if removed:
             log.info("  прибрано зі стану %s застарілих записів", removed)
 
-        if idx + 1 < len(cfg["watches"]):
-            time.sleep(float(defaults.get("pause_between_watches", 3)) + random.uniform(0, 2))
+        # Пауза потрібна лише перед НАСТУПНИМ запитом. Раніше умова рахувала
+        # всі watch'і конфігу, включно з вимкненими й відкинутими --skip, тож
+        # прогін засинав і після останнього — просто щоб завершитись пізніше.
+        if any(w2.get("enabled") is not False and wanted(w2, i2, only or [], skip or [])
+               for i2, w2 in enumerate(cfg["watches"]) if i2 > idx):
+            time.sleep(float(defaults.get("pause_between_watches", 3))
+                       + random.uniform(0, float(defaults.get("pause_jitter", 2))))
 
     # Раз на годину — звіт про зняті оголошення. У dry-run не чіпаємо: він
     # видаляє записи зі стану, а «показати й нічого не змінити» тут не вийде.
@@ -688,6 +722,7 @@ def run(cfg: dict[str, Any], state: dict[str, Any], *, dry_run: bool,
             messages.extend(sold_report(
                 cfg, state, session,
                 max_checks=int(defaults.get("sold_report_max_checks", 60)),
+                pause=float(defaults.get("sold_report_pause", 1.5)),
                 max_age_days=defaults.get("sold_check_max_age_days", 14),
             ))
             state["sold_report_last"] = now
@@ -709,6 +744,93 @@ def run(cfg: dict[str, Any], state: dict[str, Any], *, dry_run: bool,
     return messages, errors
 
 
+def explain_ad(cfg: dict[str, Any], url: str) -> int:
+    """Прогнати одне оголошення крізь усі watch'і й сказати, що з ним сталось.
+
+    Навіщо. «Чомусь не прийшло» — найчастіше питання до цього скрапера, і
+    відповідей на нього десяток: фільтр заголовка, мова, ціна, стоп-слово,
+    оголошення взагалі не в тій видачі. Вгадувати щоразу дорожче, ніж один раз
+    написати команду, яка показує рішення по кожному watch'у.
+
+    Мережею тут ходимо лише по саму сторінку оголошення — стан не читаємо і не
+    чіпаємо, тож запускати безпечно будь-коли.
+    """
+    session = olx.build_session()
+    defaults = cfg.get("defaults") or {}
+    catalog = cfg.get("books") or []
+
+    try:
+        status, body = session.get(url, timeout=30)
+    except Exception as exc:  # noqa: BLE001
+        log.error("Не вдалось відкрити сторінку: %s", exc)
+        return 1
+    if status != 200:
+        log.error("OLX відповів %s — оголошення знято або посилання хибне.", status)
+        return 1
+
+    import json as _json
+    m = olx._STATE_RE.search(body)
+    if not m:
+        log.error("На сторінці немає __PRERENDERED_STATE__ (капча?).")
+        return 1
+    data = _json.loads(_json.loads(m.group(1)))
+    raw = (data.get("ad") or {}).get("ad") or data.get("ad") or {}
+    price = ((raw.get("price") or {}).get("regularPrice") or {}).get("value")
+    ad = olx.Ad(
+        id=str(raw.get("id") or "?"), title=(raw.get("title") or "").strip(),
+        url=url, price=float(price) if isinstance(price, (int, float)) else None,
+        currency=((raw.get("price") or {}).get("regularPrice") or {}).get("currencyCode"),
+        price_text=(raw.get("price") or {}).get("displayValue") or "—",
+        city=(raw.get("location") or {}).get("cityName"),
+        created_time=raw.get("createdTime"), source="olx",
+    )
+    desc = olx.fetch_description(session, url)
+
+    log.info("Оголошення: %s", ad.title)
+    log.info("Ціна: %s · подано: %s · статус: %s",
+             ad.price_text, ad.created_time, raw.get("status"))
+    log.info("Опис: %s", (desc or "(не вдалось дістати)")[:200])
+    log.info("")
+
+    hit = False
+    for idx, w in enumerate(cfg["watches"]):
+        if str(w.get("source", "olx")).lower() != "olx":
+            continue
+        name = w.get("name") or watch_key(w, idx)
+        opt = {**defaults, **w}
+        shared = (defaults.get("exclude_keywords") or []) if opt.get("use_default_excludes", True) else []
+        opt["exclude_keywords"] = list(dict.fromkeys(shared + (w.get("exclude_keywords") or [])))
+        opt["drop_keywords"] = list(dict.fromkeys(
+            (defaults.get("drop_keywords") or []) + (w.get("drop_keywords") or [])))
+
+        if not olx.matches(ad, include=opt.get("include_keywords", []) or [],
+                           exclude=opt.get("exclude_keywords", []) or [],
+                           cities=opt.get("cities", []) or [],
+                           skip_promoted=bool(opt.get("skip_promoted", False))):
+            continue          # цей watch його просто не про це — мовчимо
+        hit = True
+        entry = analytics.book_entry(ad.title, name, catalog)
+        d = rules.decide(title=ad.title, price=ad.price, watch=opt, entry=entry,
+                         description=desc, include=opt.get("include_keywords", []) or [])
+        icon = {"notify": "📨 Telegram", "store": "💾 лише база", "skip": "✕ відкинуто"}[d.action]
+        log.info("%-34s %-13s %s", name, icon, d.reason)
+        log.info("%-34s книжка: %s%s", "", entry["name"] if entry else "(за назвою watch\'а)",
+                 "" if d.analytics else " · поза статистикою")
+
+    log.info("")
+    log.info("Тут показано лише рішення ПРАВИЛ. Watch може приймати оголошення "
+             "за фільтрами й водночас ніколи його не бачити — якщо воно не "
+             "потрапляє у видачу його запиту.")
+
+    if not hit:
+        log.info("Жоден watch не бере це оголошення: воно не проходить фільтр "
+                 "заголовка (include/exclude) в усіх пошуках.")
+        log.info("Але це ще не все: оголошення може не потрапляти й у саму "
+                 "видачу пошуку — тоді скрапер його просто не бачить. "
+                 "Перевірте, чи знаходить його ваш запит на сайті.")
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", default="watches.yaml", type=Path)
@@ -726,6 +848,8 @@ def main() -> int:
     ap.add_argument("--reset", action="store_true", help="забути стан (наступний запуск буде seed)")
     ap.add_argument("--test-notify", action="store_true",
                     help="надіслати тестове повідомлення в канали й вийти (нічого не сканує)")
+    ap.add_argument("--explain", metavar="URL",
+                    help="чому конкретне оголошення прийшло або не прийшло")
     ap.add_argument("--find-chat", action="store_true",
                     help="показати chat_id чатів, де бот нещодавно бачив повідомлення")
     ap.add_argument("-v", "--verbose", action="store_true")
@@ -750,6 +874,9 @@ def main() -> int:
         log.info(".env: підхопив %s", ", ".join(from_env_file))
 
     cfg = load_config(args.config)
+
+    if args.explain:
+        return explain_ad(cfg, args.explain)
 
     if args.find_chat:
         try:

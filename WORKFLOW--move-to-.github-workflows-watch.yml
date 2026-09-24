@@ -16,6 +16,7 @@ on:
           - normal      # звичайний прогін зі сповіщеннями
           - dry-run     # знайти, показати в логах, нічого не надсилати
           - probe       # діагностика 403: яка стратегія обходить блок
+          - rate        # заміряти, яку частоту запитів OLX терпить З ЦЬОГО IP
 
 concurrency:
   group: olx-watch
@@ -46,8 +47,18 @@ jobs:
         if: inputs.mode == 'probe'
         run: python probe.py
 
+      # Заміряти паузи треба саме тут, а не вдома: репутацію має IP, і в
+      # runner'а Azure вона зовсім інша, ніж у домашнього провайдера.
+      # Результат каже, яким може бути `pause_between_watches` у watches.yaml.
+      - name: Rate probe (яку частоту терпить OLX)
+        if: inputs.mode == 'rate'
+        env:
+          OLX_BACKEND: ${{ vars.OLX_BACKEND || 'curl_cffi' }}
+          OLX_IMPERSONATE: ${{ vars.OLX_IMPERSONATE || 'chrome131' }}
+        run: python probe.py --rate
+
       - name: Run watcher
-        if: inputs.mode != 'probe'
+        if: inputs.mode != 'probe' && inputs.mode != 'rate'
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}

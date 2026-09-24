@@ -175,9 +175,13 @@ def decide(*, title: str, price: float | None, watch: dict[str, Any],
         if w and w.casefold() in hay.casefold():
             return Decision("skip", reason=f"стоп-слово «{w}»")
 
-    # 3. Російськомовне оголошення. Дві незалежні ознаки, бо кожна окремо
-    #    дірява: заголовок «Гаррі Поттер, вид. Росмен» українських літер не
-    #    порушує, а «Гарри Поттер и узник Азкабана» не згадує видавництва.
+    # 3. Чужомовне видання — геть, і російське, і англомовне. Причина в обох
+    #    випадках та сама: у них свій ринок і свої ціни, тож у спільній
+    #    статистиці вони лише зсувають медіану, а в Telegram — заважають.
+    #
+    #    Ознак кілька, бо кожна окремо дірява: заголовок «Гаррі Поттер, вид.
+    #    Росмен» українських літер не порушує, а «Гарри Поттер и узник
+    #    Азкабана» не згадує видавництва.
     if _opt(entry, watch, "drop_russian", default=False):
         if is_russian_text(title):
             return Decision("skip", reason="російськомовний заголовок")
@@ -188,9 +192,7 @@ def decide(*, title: str, price: float | None, watch: dict[str, Any],
             if pub and pub.casefold() in hay.casefold():
                 return Decision("skip", reason=f"російське видавництво «{pub}»")
 
-    # 3б. Англомовне видання. На відміну від російського воно не потрібне
-    #     навіть для історії: ціни на англійські видання живуть своїм життям
-    #     і українську медіану лише зсувають.
+    # 3б. Англомовне — те саме, але розпізнається інакше (див. is_english_text).
     if _opt(entry, watch, "drop_english", default=False):
         if description and is_english_text(description):
             return Decision("skip", reason="англомовний опис")
@@ -199,35 +201,16 @@ def decide(*, title: str, price: float | None, watch: dict[str, Any],
         if not description and is_english_text(title, min_letters=20, share=0.95):
             return Decision("skip", reason="англомовний заголовок")
 
-    # 3в. Російське — «мовчки»: зберігаємо заради історії, але не пишемо.
-    #     Окремо від drop_russian, бо для Кінга й Ріггза російське видання —
-    #     це факт ринку, а для Гаррі Поттера просто сміття.
-    silent = False
-    if _opt(entry, watch, "silent_russian", default=False):
-        if is_russian_text(title) or (description and is_russian_text(description)):
-            silent = True
-        elif any(p.casefold() in hay.casefold()
-                 for p in (_opt(entry, watch, "russian_publishers",
-                                default=RUSSIAN_PUBLISHERS) or []) if p):
-            silent = True
-
     # 4. Комплект. Дивимось і заголовок, і опис.
     bundle = is_bundle_text(hay, include=include,
                             bundle_keywords=watch.get("bundle_keywords") or ())
     bundle_analytics = bool(_opt(entry, watch, "bundle_analytics", default=True))
     analytics = bundle_analytics if bundle else True
 
-    def out(d: Decision) -> Decision:
-        """Останній фільтр: російське оголошення нікуди не пише, лише лягає в базу."""
-        if silent and d.action == "notify":
-            return Decision("store", analytics=d.analytics,
-                            reason=f"{d.reason}; але російською — мовчимо")
-        return d
-
     if bundle and _opt(entry, watch, "bundle_notify", default=False):
         # Комплект шлемо попри будь-які пороги: за набір книг просять зовсім
         # інші гроші, і жодна межа для одиночного тому тут не працює.
-        return out(Decision("notify", analytics=bundle_analytics,
+        return (Decision("notify", analytics=bundle_analytics,
                             reason="комплект", tag="bundle"))
 
     # 5. Ціна. Пороги беруться з каталогу, якщо він їх задає, інакше з watch'а.
@@ -265,17 +248,17 @@ def decide(*, title: str, price: float | None, watch: dict[str, Any],
         # Обмін / «договірна». Статистиці така ціна нічого не дає, але
         # оголошення варто пам'ятати, щоб не слати його повторно.
         if watch.get("allow_no_price"):
-            return out(Decision("notify", analytics=False, reason="без ціни"))
+            return (Decision("notify", analytics=False, reason="без ціни"))
         return Decision("store", analytics=False, reason="без ціни")
 
     if notify_max is not None and price <= float(notify_max):
-        return out(Decision("notify", analytics=analytics,
+        return (Decision("notify", analytics=analytics,
                             reason=f"ціна ≤ {float(notify_max):g}"))
 
     if notify_high is not None and price >= float(notify_high):
         # Не «купувати», а «подивитись, скільки за це просять». У Telegram
         # такі йдуть з іншим значком, щоб не плутати з вигідною знахідкою.
-        return out(Decision("notify", analytics=analytics,
+        return (Decision("notify", analytics=analytics,
                             reason=f"ціна ≥ {float(notify_high):g} (маркер цінності)",
                             tag="high"))
 

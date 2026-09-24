@@ -188,7 +188,7 @@ def test_high_marker_alone_does_not_open_the_cheap_gate():
 
 # ─────────────────────────────────────────────── мова оголошення
 
-KING = {"max_price": 2000, "silent_russian": True, "drop_english": True}
+KING = {"max_price": 2000, "drop_russian": True, "drop_english": True}
 
 RU_DESC = ("Продам книгу в отличном состоянии, издательство АСТ, 480 страниц, "
            "твердый переплет. Отправка Новой почтой по предоплате.")
@@ -198,13 +198,14 @@ UA_DESC = ("Продам книжку у гарному стані, видавн
            "Надсилаю Новою поштою по всій Україні.")
 
 
-def test_russian_ad_is_kept_for_history_but_never_sent():
-    """Кінг і Ріггз російською трапляються постійно: ціну ринку вони таки
-    показують, а в Telegram їм робити нічого."""
+def test_russian_ad_is_dropped_everywhere():
+    """Рішення 2026-09-23: російські видання мають свій ринок і свої ціни, тож
+    у спільній статистиці вони лише зсувають медіану. Раніше такі зберігались
+    мовчки — більше ні."""
     d = rules.decide(title="Стівен Кінг Безсоння", description=RU_DESC,
                      price=195, watch=KING)
-    assert d.action == "store"
-    assert not d.notify and d.store
+    assert d.action == "skip"
+    assert not d.store
 
 
 def test_english_ad_is_not_kept_at_all():
@@ -255,3 +256,57 @@ def test_foundation_sends_everything_including_ads_without_a_price():
     w = {"max_price": 100000, "notify_max_price": 100000, "allow_no_price": True}
     assert rules.decide(title="Азімов Фундація", price=1500, watch=w).notify
     assert rules.decide(title="Азімов Фундація обмін", price=None, watch=w).notify
+
+
+# ─────────────────────────────────────────────── англомовні видання
+
+def test_english_edition_named_in_a_ukrainian_description():
+    """Реальний пропуск 2026-09-24: «Гаррі Поттер і філософський камінь
+    англійською» описаний УКРАЇНСЬКОЮ — продавець просто каже, якою мовою
+    книжка. Латиниці в такому описі нуль, а видання англійське."""
+    d = rules.decide(
+        title="Гаррі Поттер і філософський камінь англійською", price=199,
+        watch={"max_price": 2000, "drop_english": True},
+        description="Книга Гаррі Поттер і філософський камінь, в оригіналі, "
+                    "англійською. В дуже гарному стані")
+    assert d.action == "skip"
+
+
+def test_english_edition_with_the_word_anglomovne():
+    d = rules.decide(
+        title="Harry Potter and the Philosopher's Stone англ. Дж. К. Ролінґ",
+        price=130, watch={"max_price": 2000, "drop_english": True},
+        description="Англомовне видання «Harry Potter and the Philosopher's "
+                    "Stone» Дж. К. Ролінґ. Книга вживана.")
+    assert d.action == "skip"
+
+
+def test_translated_from_english_is_not_an_english_edition():
+    """Пастка: «переклад з англійської» стоїть у половині описів українських
+    видань. Корінь «англ» відрізав би їх усі, тому маркер — саме «англійською»."""
+    d = rules.decide(
+        title="Гаррі Поттер і келих вогню", price=250,
+        watch={"max_price": 2000, "drop_english": True},
+        description="Видавництво А-БА-БА-ГА-ЛА-МА-ГА, переклад з англійської "
+                    "Віктора Морозова, тверда палітурка.")
+    assert d.notify
+
+
+# ─────────────────────────────────────────────── видавництво цілим словом
+
+def test_publisher_is_matched_as_a_whole_word():
+    """Реальна втрата 2026-09-24: голе «аст» підрядком сиділо в «п'яТА ЧАСТина»
+    і вбило живе оголошення «Орден Фенікса» за 220 грн."""
+    d = rules.decide(
+        title="Книга Гаррі Поттер і Орден Фенікса, Джоан Ролінг", price=220,
+        watch={"max_price": 2000, "notify_max_price": 1600, "drop_russian": True},
+        description="OLX доставка Гаррі Поттер і Орден Фенікса — п'ята частина "
+                    "пригод Джоан Ролінг про Гаррі Поттер")
+    assert d.notify, d.reason
+
+
+def test_real_russian_publisher_still_caught():
+    assert rules.mentions_publisher("издательство АСТ, 480 страниц",
+                                    rules.RUSSIAN_PUBLISHERS) == "аст"
+    assert rules.mentions_publisher("Відьмак Вежа Ластівки Сапковський",
+                                    rules.RUSSIAN_PUBLISHERS) is None
