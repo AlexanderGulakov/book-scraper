@@ -320,33 +320,35 @@ books:
 
   # ── Дж. К. Ролінґ ─────────────────────────────────────────────────────────
   - name: "Поттер: Філософський камінь"
-    watch: ["Гаррі Поттер"]
+    watch: &hp_watches ["Гаррі Поттер", "Поттер: Філософський камінь", "Поттер: Таємна кімната",
+                        "Поттер: В'язень Азкабану", "Поттер: Келих вогню", "Поттер: Орден Фенікса",
+                        "Поттер: Напівкровний Принц", "Поттер: Смертельні реліквії", "Поттер: Прокляте дитя"]
     any: ["філософський камінь", "philosopher's stone"]
   - name: "Поттер: Таємна кімната"
-    watch: ["Гаррі Поттер"]
+    watch: *hp_watches
     any: ["таємна кімната", "chamber of secrets"]
   - name: "Поттер: В'язень Азкабану"
-    watch: ["Гаррі Поттер"]
+    watch: *hp_watches
     any: ["азкабану", "azkaban"]
   - name: "Поттер: Келих вогню"
-    watch: ["Гаррі Поттер"]
+    watch: *hp_watches
     any: ["келих вогню", "кубок вогню", "goblet of fire"]
   - name: "Поттер: Орден Фенікса"
-    watch: ["Гаррі Поттер"]
+    watch: *hp_watches
     any: ["орден фенікса", "order of the phoenix"]
   - name: "Поттер: Напівкровний Принц"
-    watch: ["Гаррі Поттер"]
+    watch: *hp_watches
     any: ["напівкровний", "half-blood"]
   - name: "Поттер: Смертельні реліквії"
-    watch: ["Гаррі Поттер"]
+    watch: *hp_watches
     any: ["смертельні реліквії", "дари смерті", "deathly hallows"]
   - name: "Поттер: Прокляте дитя"
-    watch: ["Гаррі Поттер"]
+    watch: *hp_watches
     any: ["прокляте дитя", "cursed child"]
     notify_max: 180
     store_max: 250         # дорожче — навіть у статистику не беремо
   - name: "Поттер: Фантастичні звірі"
-    watch: ["Гаррі Поттер"]
+    watch: *hp_watches
     all: ["фантастичні звірі"]
 
   # ── Айзек Азімов ──────────────────────────────────────────────────────────
@@ -410,29 +412,49 @@ watches:
     bundle_notify: true        # комплект шлемо попри пороги
     bundle_analytics: false    # …але медіану по ньому не рахуємо
 
-  # Найгаласливіший пошук з усіх, і саме тому найсуворіший.
+  # ── Гаррі Поттер ──────────────────────────────────────────────────────────
+  # Дев'ять пошуків: один збиральний за назвою серії плюс вісім за назвами
+  # книжок. Так було не завжди — до 2026-09-25 стояв ЛИШЕ збиральний, і це
+  # виявилось великою дірою.
   #
-  # include_keywords з'явився 2026-09-22: без нього сюди летіло все, де є слова
-  # «Гаррі Поттер» — «Чаклунський альманах», фігурки Герміони, «История
-  # волшебства». Тепер оголошення мусить назвати конкретну книжку серії
+  # Привід: користувач приніс три живі оголошення за 250 грн, яких не було в
+  # сповіщеннях. Причина — продавець написав «Гіррі Поттер» замість «Гаррі».
+  # OLX помилок не виправляє: `q-гаррі-поттер` не знаходить їх узагалі, а
+  # `q-гіррі-поттер` віддає всі три.
+  #
+  # Але замір показав, що справа не в одній помилці. Скільки оголошень по темі
+  # дає запит за назвою книжки, яких НЕМАЄ в трьох сторінках «гаррі поттер»
+  # (заміряно 2026-09-25):
+  #
+  #   келих вогню          +22        в'язень азкабану     +17
+  #   напівкровний принц   +17        прокляте дитя        +17
+  #   смертельні реліквії  +13        таємна кімната        +9
+  #   орден фенікса         +8        філософський камінь   +7
+  #
+  # Разом ~110 оголошень, яких збиральний запит не бачив. Назва книжки —
+  # унікальна й обов'язкова, назва серії — ні: її пишуть з помилками, скорочують
+  # або не пишуть зовсім. Те саме, що вже знали з Клер і Кінга.
+  #
+  # include_keywords: оголошення мусить назвати конкретну книжку серії
   # УКРАЇНСЬКОЮ; «узник Азкабана» не збігається з «азкабану» і відсіюється.
-  #
-  # drop_russian прибирає решту: чужі літери (ы ъ э ё), російські слова цілим
-  # словом («и», «состояние») і російські видавництва з опису («Росмен»).
-  # Ілюстровані видання коштують утричі більше за звичайні й тягнуть медіану
-  # вгору, тому теж геть.
+  # drop_russian прибирає решту: чужі літери, російські слова цілим словом,
+  # російські видавництва з опису. Ілюстровані коштують утричі більше за
+  # звичайні й тягнуть медіану вгору, тому теж геть.
+  # ⚠ Назву цього watch'а не чіпати. Ключ стану — це `name`, і перейменування
+  # робить старий запис «осиротілим»: forget_orphans видаляє його разом з усіма
+  # оголошеннями, наступний прогін стає seed'ом, а історія цін по них зникає.
   - name: "Гаррі Поттер"
     url: "https://www.olx.ua/uk/hobbi-otdyh-i-sport/knigi-zhurnaly/q-%D0%B3%D0%B0%D1%80%D1%80%D1%96-%D0%BF%D0%BE%D1%82%D1%82%D0%B5%D1%80/?currency=UAH&search%5Border%5D=created_at%3Adesc"
-    max_price: 2000
+    max_price: &hp_max 2000
     # 1600 — це не «стільки готовий платити за книжку», а запобіжник: за
     # семитомник просять 1500-2500, і без верхньої межі комплект просто
     # проскочив би повз Telegram. Окремі книжки все одно коштують у рази менше.
-    notify_max_price: 1600
+    notify_max_price: &hp_notify 1600
     needs_description: true
-    drop_keywords: ["ілюстрован", "иллюстрирован", "illustrated", "альманах",
+    drop_keywords: &hp_drop ["ілюстрован", "иллюстрирован", "illustrated", "альманах",
                     "історія магії", "история волшебства", "енциклопед",
                     "розмальовк", "щоденник", "блокнот"]
-    include_keywords:
+    include_keywords: &hp_books
       - "філософський камінь"
       - "таємна кімната"
       - "азкабану"
@@ -452,6 +474,80 @@ watches:
       - "half-blood"
       - "deathly hallows"
       - "cursed child"
+    # «Філософський камінь» — ще й роман Сергія Сартакова 1977 року.
+    exclude_keywords: &hp_noise ["сартаков"]
+
+  - name: "Поттер: Філософський камінь"
+    url: "https://www.olx.ua/uk/hobbi-otdyh-i-sport/knigi-zhurnaly/q-%D1%84%D1%96%D0%BB%D0%BE%D1%81%D0%BE%D1%84%D1%81%D1%8C%D0%BA%D0%B8%D0%B9-%D0%BA%D0%B0%D0%BC%D1%96%D0%BD%D1%8C/?currency=UAH&search%5Border%5D=created_at%3Adesc"
+    max_price: *hp_max
+    notify_max_price: *hp_notify
+    needs_description: true
+    drop_keywords: *hp_drop
+    include_keywords: *hp_books
+    exclude_keywords: *hp_noise
+
+  - name: "Поттер: Таємна кімната"
+    url: "https://www.olx.ua/uk/hobbi-otdyh-i-sport/knigi-zhurnaly/q-%D1%82%D0%B0%D1%94%D0%BC%D0%BD%D0%B0-%D0%BA%D1%96%D0%BC%D0%BD%D0%B0%D1%82%D0%B0/?currency=UAH&search%5Border%5D=created_at%3Adesc"
+    max_price: *hp_max
+    notify_max_price: *hp_notify
+    needs_description: true
+    drop_keywords: *hp_drop
+    include_keywords: *hp_books
+    exclude_keywords: *hp_noise
+
+  - name: "Поттер: В'язень Азкабану"
+    url: "https://www.olx.ua/uk/hobbi-otdyh-i-sport/knigi-zhurnaly/q-%D0%B2%27%D1%8F%D0%B7%D0%B5%D0%BD%D1%8C-%D0%B0%D0%B7%D0%BA%D0%B0%D0%B1%D0%B0%D0%BD%D1%83/?currency=UAH&search%5Border%5D=created_at%3Adesc"
+    max_price: *hp_max
+    notify_max_price: *hp_notify
+    needs_description: true
+    drop_keywords: *hp_drop
+    include_keywords: *hp_books
+    exclude_keywords: *hp_noise
+
+  - name: "Поттер: Келих вогню"
+    url: "https://www.olx.ua/uk/hobbi-otdyh-i-sport/knigi-zhurnaly/q-%D0%BA%D0%B5%D0%BB%D0%B8%D1%85-%D0%B2%D0%BE%D0%B3%D0%BD%D1%8E/?currency=UAH&search%5Border%5D=created_at%3Adesc"
+    max_price: *hp_max
+    notify_max_price: *hp_notify
+    needs_description: true
+    drop_keywords: *hp_drop
+    include_keywords: *hp_books
+    exclude_keywords: *hp_noise
+
+  - name: "Поттер: Орден Фенікса"
+    url: "https://www.olx.ua/uk/hobbi-otdyh-i-sport/knigi-zhurnaly/q-%D0%BE%D1%80%D0%B4%D0%B5%D0%BD-%D1%84%D0%B5%D0%BD%D1%96%D0%BA%D1%81%D0%B0/?currency=UAH&search%5Border%5D=created_at%3Adesc"
+    max_price: *hp_max
+    notify_max_price: *hp_notify
+    needs_description: true
+    drop_keywords: *hp_drop
+    include_keywords: *hp_books
+    exclude_keywords: *hp_noise
+
+  - name: "Поттер: Напівкровний Принц"
+    url: "https://www.olx.ua/uk/hobbi-otdyh-i-sport/knigi-zhurnaly/q-%D0%BD%D0%B0%D0%BF%D1%96%D0%B2%D0%BA%D1%80%D0%BE%D0%B2%D0%BD%D0%B8%D0%B9-%D0%BF%D1%80%D0%B8%D0%BD%D1%86/?currency=UAH&search%5Border%5D=created_at%3Adesc"
+    max_price: *hp_max
+    notify_max_price: *hp_notify
+    needs_description: true
+    drop_keywords: *hp_drop
+    include_keywords: *hp_books
+    exclude_keywords: *hp_noise
+
+  - name: "Поттер: Смертельні реліквії"
+    url: "https://www.olx.ua/uk/hobbi-otdyh-i-sport/knigi-zhurnaly/q-%D1%81%D0%BC%D0%B5%D1%80%D1%82%D0%B5%D0%BB%D1%8C%D0%BD%D1%96-%D1%80%D0%B5%D0%BB%D1%96%D0%BA%D0%B2%D1%96%D1%97/?currency=UAH&search%5Border%5D=created_at%3Adesc"
+    max_price: *hp_max
+    notify_max_price: *hp_notify
+    needs_description: true
+    drop_keywords: *hp_drop
+    include_keywords: *hp_books
+    exclude_keywords: *hp_noise
+
+  - name: "Поттер: Прокляте дитя"
+    url: "https://www.olx.ua/uk/hobbi-otdyh-i-sport/knigi-zhurnaly/q-%D0%BF%D1%80%D0%BE%D0%BA%D0%BB%D1%8F%D1%82%D0%B5-%D0%B4%D0%B8%D1%82%D1%8F/?currency=UAH&search%5Border%5D=created_at%3Adesc"
+    max_price: *hp_max
+    notify_max_price: *hp_notify
+    needs_description: true
+    drop_keywords: *hp_drop
+    include_keywords: *hp_books
+    exclude_keywords: *hp_noise
 
   # ── Кассандра Клер, цикл «Знаряддя смерті» ───────────────────────────────
   # Було сім запитів по одній сторінці, стало один по трьох. Заміряно на живій
