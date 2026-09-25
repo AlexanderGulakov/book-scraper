@@ -127,9 +127,22 @@ def fetch_watch(session: Fetcher, url: str, pages: int = 1, *, pause: float = 2.
 
 
 def matches(ad: Ad, *, include: Iterable[str] = (), exclude: Iterable[str] = (),
-            cities: Iterable[str] = (), skip_promoted: bool = False,
-            allow_similar: bool = False) -> bool:
-    """Фільтри, не пов'язані з ціною (застосовуються ДО відстеження стану)."""
+            require: Iterable[str] = (), cities: Iterable[str] = (),
+            skip_promoted: bool = False, allow_similar: bool = False) -> bool:
+    """Фільтри, не пов'язані з ціною (застосовуються ДО відстеження стану).
+
+    `include` і `require` — два незалежні списки, кожен по АБО всередині, але
+    між собою по І. Одного списку тут мало, і це коштувало двох хибних
+    спрацювань 2026-09-25: назви книжок Поттера не унікальні («Таємна кімната»
+    є ще й у «Школи без нудьги», «Філософський камінь» — у Сартакова), а
+    вимагати саме «поттер» не можна, бо тоді загубляться оголошення, підписані
+    лише назвою. Разом: назва книжки І хоч якась згадка автора чи серії.
+
+    Заміряно перед тим, як це вводити: зі 122 оголошень, що збіглись по назві
+    книжки, 118 згадують Поттера/Ролінґ/Hogwarts. Решта чотири — Сартаков,
+    «Школа без нудьги», гуртовий лот і колекційне MinaLima (це вже ловиться
+    латинським «potter»). Тобто вимога не коштує майже нічого.
+    """
     if ad.similar and not allow_similar:
         return False
     if skip_promoted and ad.promoted:
@@ -141,6 +154,9 @@ def matches(ad: Ad, *, include: Iterable[str] = (), exclude: Iterable[str] = (),
     haystack = f"{ad.title} {ad.author or ''}".casefold()
     inc = [w.casefold() for w in include if w]
     if inc and not any(w in haystack for w in inc):
+        return False
+    req = [w.casefold() for w in require if w]
+    if req and not any(w in haystack for w in req):
         return False
     if any(w.casefold() in haystack for w in exclude if w):
         return False

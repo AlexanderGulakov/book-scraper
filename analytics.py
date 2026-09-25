@@ -336,6 +336,8 @@ def cheapest_now(cfg: dict[str, Any], state: dict[str, Any], *,
     того, чи вдався конкретний прогін, і не коштує нічого.
 
     Що не бере:
+    - оголошення, книжку яких не впізнав каталог `books:` — див. нижче;
+    - оголошення з Букфлі: там інший (і менший) ринок;
     - оголошення, яких давно не бачили у видачі (`stalled_seen_hours`): мертве
       посилання гірше за відсутність рядка;
     - усе, що шар правил позначив `an: false` — комплекти й лоти. Порівнювати
@@ -353,6 +355,11 @@ def cheapest_now(cfg: dict[str, Any], state: dict[str, Any], *,
         w = watches.get(wname)
         if w is None:
             continue
+        # Тільки OLX. Букфлі — інший ринок і менший: дешевше за OLX там наразі
+        # не буває, тож порівнювати варто з OLX в обидві сторони. Заразом це
+        # прибирає посилання на картку Букфлі під оголошенням Букфлі.
+        if str(w.get("source", "olx")).lower() != "olx":
+            continue
         for ad_id, rec in (ws.get("ads") or {}).items():
             if rec.get("an") is False:
                 continue
@@ -362,9 +369,16 @@ def cheapest_now(cfg: dict[str, Any], state: dict[str, Any], *,
             title = str(rec.get("title") or "")
             if not _usable(title, rec.get("price"), rec.get("cur"), w, opt):
                 continue
-            name = book_key(title, wname, catalog=catalog,
-                            include=w.get("include_keywords") or [],
-                            bundle_keywords=w.get("bundle_keywords") or [])
+            name, from_catalog = book_match(title, wname, catalog=catalog,
+                                            include=w.get("include_keywords") or [],
+                                            bundle_keywords=w.get("bundle_keywords") or [])
+            # 🔑 Лише коли книжку впізнав КАТАЛОГ. Інакше ключем стає назва
+            # watch'а, а вона об'єднує все, що той watch ловить: у «Бункері»
+            # під одним ключем опинялись і Г'ю Хауї, і «Зимою в бункер», і
+            # найдешевшим ставала чужа книжка. Краще не показати рядок, ніж
+            # показати посилання на іншу книжку.
+            if not from_catalog:
+                continue
             price = float(rec["price"])
             cur = best.get(name)
             if cur is None or price < cur["price"]:

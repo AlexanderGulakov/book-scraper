@@ -622,6 +622,7 @@ def run(cfg: dict[str, Any], state: dict[str, Any], *, dry_run: bool,
                 a,
                 include=opt.get("include_keywords", []) or [],
                 exclude=opt.get("exclude_keywords", []) or [],
+                require=opt.get("require_any", []) or [],
                 cities=opt.get("cities", []) or [],
                 skip_promoted=bool(opt.get("skip_promoted", False)),
                 allow_similar=bool(opt.get("allow_similar", False)),
@@ -866,6 +867,7 @@ def explain_ad(cfg: dict[str, Any], url: str) -> int:
 
         if not olx.matches(ad, include=opt.get("include_keywords", []) or [],
                            exclude=opt.get("exclude_keywords", []) or [],
+                           require=opt.get("require_any", []) or [],
                            cities=opt.get("cities", []) or [],
                            skip_promoted=bool(opt.get("skip_promoted", False))):
             continue          # цей watch його просто не про це — мовчимо
