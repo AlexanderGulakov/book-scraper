@@ -107,6 +107,14 @@ class JsonStore:
 #  Mongo
 # ─────────────────────────────────────────────────────────────────────────────
 
+# Поля службового документа `meta`. Список один на читання й на запис: доки
+# він був виписаний тричі окремо, будь-яке нове поле мовчки не зберігалось.
+#   tg_offset  — до якого update_id уже прочитані натискання кнопок у Telegram;
+#   manual_ru  — оголошення, які користувач руками позначив російськими.
+META_FIELDS = ("version", "book_report_date", "sold_report_last",
+               "tg_offset", "manual_ru")
+
+
 def _watch_doc(key: str, ws: dict[str, Any]) -> dict[str, Any]:
     doc = {k: v for k, v in ws.items() if k not in _WATCH_FIELDS_SKIP}
     doc["_id"] = key
@@ -228,7 +236,7 @@ class MongoStore:
         state = empty_state()
 
         meta = self.db.meta.find_one({"_id": "state"}) or {}
-        for field in ("version", "book_report_date", "sold_report_last"):
+        for field in META_FIELDS:
             if meta.get(field) is not None:
                 state[field] = meta[field]
         state.setdefault("version", STATE_VERSION)
@@ -370,11 +378,11 @@ class MongoStore:
 
         # 4. meta — останньою: це «прогін дорахував до кінця».
         meta = {"_id": "state", "version": state.get("version", STATE_VERSION)}
-        for field in ("book_report_date", "sold_report_last"):
+        for field in META_FIELDS[1:]:
             if state.get(field) is not None:
                 meta[field] = state[field]
         old_meta = {"_id": "state", "version": snap.get("version", STATE_VERSION)}
-        for field in ("book_report_date", "sold_report_last"):
+        for field in META_FIELDS[1:]:
             if snap.get(field) is not None:
                 old_meta[field] = snap[field]
         if meta != old_meta:

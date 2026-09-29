@@ -11,6 +11,7 @@ import argparse
 import logging
 import os
 import random
+import re
 import sys
 import time
 from datetime import datetime, timedelta, timezone
@@ -34,7 +35,8 @@ STATE_VERSION = storage.STATE_VERSION
 # копіюються на домашню машину руками й легко оновити не всі.
 REQUIRED_API = {
     "notify": ["build_channels", "dispatch", "format_event", "format_test",
-               "format_heartbeat", "format_watch_error", "format_cheapest"],
+               "format_heartbeat", "format_watch_error", "format_cheapest",
+               "poll_marks", "confirm_mark", "Message"],
     "olx": ["build_session", "fetch_watch", "matches", "price_ok", "ad_state",
             "fetch_description"],
     "bookflea": ["collect"],
@@ -458,6 +460,46 @@ def keyword_ok(ad: Any, rules: dict[str, Any]) -> bool:
                        exclude=rule.get("exclude") or [])
 
 
+def apply_marks(state: dict[str, Any]) -> int:
+    """Забирає з Telegram натискання «це російське видання» і застосовує їх.
+
+    Навіщо взагалі ручна позначка. Мову видання інколи видно ЛИШЕ з обкладинки:
+    опис український, у заголовку ні слова про мову, а книжка російська.
+    Реальний випадок 2026-09-29 — «Книги Ренсома Ріґґз Дім дивних дітей» за
+    50 грн стало «найдешевшим» під українським виданням за 350. Жоден текстовий
+    фільтр такого не бачить, і читати обкладинки ми не вміємо.
+
+    Позначка робить дві речі: оголошення більше не потрапляє в статистику й у
+    «найдешевше зараз» (`an: false`), і наступні прогони його не розглядають
+    взагалі (`manual_ru`). Ідемпотентна: повторне натискання нічого не зіпсує.
+    """
+    marks, new_offset = notify.poll_marks(state.get("tg_offset"))
+    if new_offset is not None:
+        state["tg_offset"] = new_offset
+    if not marks:
+        return 0
+
+    flagged: dict[str, Any] = state.setdefault("manual_ru", {})
+    now = datetime.now(timezone.utc).isoformat()
+    for mark in marks:
+        ad_id = str(mark.get("ad_id") or "")
+        if not ad_id:
+            continue
+        flagged.setdefault(ad_id, now)
+        # Оголошення живе в кількох watch'ах одразу — гасимо в усіх.
+        for ws in (state.get("watches") or {}).values():
+            rec = (ws.get("ads") or {}).get(ad_id)
+            if rec is not None:
+                rec["an"] = False
+            ws.setdefault("dropped", {})[ad_id] = now
+        try:
+            notify.confirm_mark(mark)
+        except Exception as exc:  # noqa: BLE001
+            log.debug("Не вдалось підтвердити позначку %s: %s", ad_id, exc)
+        log.info("Позначено російським вручну: %s", ad_id)
+    return len(marks)
+
+
 def _cheapest(cfg: dict[str, Any], cheap_map: dict[str, Any], watch_name: str,
               ad: Any) -> dict[str, Any] | None:
     """Найдешевше живе оголошення на ту саму книжку. Теж не валить прогін."""
@@ -521,6 +563,16 @@ def run(cfg: dict[str, Any], state: dict[str, Any], *, dry_run: bool,
     # Профілі цін рахуємо один раз на прогін — це чиста арифметика над станом,
     # без жодного запиту в мережу. Далі кожне сповіщення про оголошення
     # отримує з них коментар («Брати не думаючи» / «Задорого» / …).
+    # Спершу ручні позначки: інакше щойно позначене оголошення ще раз потрапить
+    # і в профілі цін, і в «найдешевше зараз» цього ж прогону.
+    if not dry_run:
+        try:
+            marked = apply_marks(state)
+            if marked:
+                log.info("Застосовано ручних позначок: %s", marked)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Не вдалось прочитати позначки з Telegram: %s", exc)
+
     try:
         prof_map = analytics.profiles(cfg, state)
     except Exception as exc:  # noqa: BLE001
@@ -647,8 +699,9 @@ def run(cfg: dict[str, Any], state: dict[str, Any], *, dry_run: bool,
         want_desc = bool(opt.get("needs_description")) and source == "olx"
 
         new_cnt = drop_cnt = skip_cnt = quiet_cnt = 0
+        manual_ru = state.get("manual_ru") or {}
         for ad in kept:
-            if ad.id in refused:
+            if ad.id in refused or ad.id in manual_ru:
                 continue
             prev = known.get(ad.id)
 
@@ -690,9 +743,10 @@ def run(cfg: dict[str, Any], state: dict[str, Any], *, dry_run: bool,
 
             if prev is None:
                 if d.notify and not first_run and ad.id not in announced:
-                    messages.append(notify.format_event(
+                    messages.append(notify.Message(notify.format_event(
                         "new", name, ad, verdict=_verdict(cfg, prof_map, name, ad),
-                        mark=d.tag, cheapest=_cheapest(cfg, cheap_map, name, ad)))
+                        mark=d.tag, cheapest=_cheapest(cfg, cheap_map, name, ad)),
+                        mark_id=ad.id))
                     announced.add(ad.id)
                     new_cnt += 1
                 elif not d.notify:
@@ -707,10 +761,11 @@ def run(cfg: dict[str, Any], state: dict[str, Any], *, dry_run: bool,
                     and ad.price < old * (1 - threshold)
                 )
                 if cheaper and ad.id not in announced:
-                    messages.append(notify.format_event(
+                    messages.append(notify.Message(notify.format_event(
                         "drop", name, ad, old_price=old,
                         verdict=_verdict(cfg, prof_map, name, ad), mark=d.tag,
-                        cheapest=_cheapest(cfg, cheap_map, name, ad)))
+                        cheapest=_cheapest(cfg, cheap_map, name, ad)),
+                        mark_id=ad.id))
                     announced.add(ad.id)
                     drop_cnt += 1
 
@@ -911,6 +966,8 @@ def main() -> int:
     ap.add_argument("--reset", action="store_true", help="забути стан (наступний запуск буде seed)")
     ap.add_argument("--test-notify", action="store_true",
                     help="надіслати тестове повідомлення в канали й вийти (нічого не сканує)")
+    ap.add_argument("--mark-ru", metavar="ID|URL", action="append", default=[],
+                    help="позначити оголошення російським вручну (без Telegram)")
     ap.add_argument("--explain", metavar="URL",
                     help="чому конкретне оголошення прийшло або не прийшло")
     ap.add_argument("--find-chat", action="store_true",
@@ -937,6 +994,26 @@ def main() -> int:
         log.info(".env: підхопив %s", ", ".join(from_env_file))
 
     cfg = load_config(args.config)
+
+    if args.mark_ru:
+        store = storage.open_store(args, cfg)
+        state = store.load()
+        flagged = state.setdefault("manual_ru", {})
+        now = datetime.now(timezone.utc).isoformat()
+        for raw in args.mark_ru:
+            # З посилання беремо id так само, як його бачить OLX: -ID<код>.html
+            m = re.search(r"-ID([A-Za-z0-9]+)\.html", str(raw))
+            ad_id = m.group(1) if m else str(raw).strip()
+            flagged.setdefault(ad_id, now)
+            for ws in (state.get("watches") or {}).values():
+                rec = (ws.get("ads") or {}).get(ad_id)
+                if rec is not None:
+                    rec["an"] = False
+                ws.setdefault("dropped", {})[ad_id] = now
+            log.info("Позначено російським: %s", ad_id)
+        store.save(state)
+        log.info("Усього ручних позначок у базі: %s", len(flagged))
+        return 0
 
     if args.explain:
         return explain_ad(cfg, args.explain)

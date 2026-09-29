@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import html
+import json
 import logging
 import os
 import smtplib
@@ -19,6 +20,38 @@ TG_API = "https://api.telegram.org/bot{token}/{method}"
 MAX_MESSAGES_PER_RUN = 25  # запобіжник від флуду, якщо пошук раптом віддав сотні збігів
 
 
+class Message(str):
+    """Текст повідомлення плюс те, чого в тексті не видно.
+
+    Це підклас `str`, а не окремий тип, і навмисно: повідомлення ходять через
+    `dispatch`, лог, e-mail і півдесятка тестів, які працюють з ними як з
+    рядками. Перша спроба зробити з них NamedTuple миттєво поламала п'ять
+    тестів на `"текст" in msg` — а зламати розсилку заради однієї кнопки було б
+    погано.
+
+    `mark_id` — id оголошення, до якого чіпляти кнопку «російське видання».
+    Немає id — немає кнопки: під пульсом і звітами їй нічого позначати.
+    """
+
+    mark_id: str | None
+
+    def __new__(cls, text: str, mark_id: str | None = None) -> "Message":
+        obj = super().__new__(cls, text)
+        obj.mark_id = mark_id
+        return obj
+
+
+MARK_RU_PREFIX = "ru:"
+
+
+def mark_keyboard(ad_id: str) -> dict[str, Any]:
+    """Одна кнопка під сповіщенням. `callback_data` ≤ 64 байти — id влазить."""
+    return {"inline_keyboard": [[{
+        "text": "🚫 Це російське видання",
+        "callback_data": f"{MARK_RU_PREFIX}{ad_id}"[:64],
+    }]]}
+
+
 def esc(s: Any) -> str:
     return html.escape(str(s if s is not None else ""), quote=False)
 
@@ -29,9 +62,12 @@ class Telegram:
         self.chat_id = chat_id
         self.session = requests.Session()
 
-    def send(self, text: str, *, photo: str | None = None) -> bool:
+    def send(self, text: str, *, photo: str | None = None,
+             keyboard: dict[str, Any] | None = None) -> bool:
+        extra = {"reply_markup": json.dumps(keyboard)} if keyboard else {}
         if photo:
-            ok = self._call("sendPhoto", {"photo": photo, "caption": text[:1024], "parse_mode": "HTML"})
+            ok = self._call("sendPhoto", {"photo": photo, "caption": text[:1024],
+                                          "parse_mode": "HTML", **extra})
             if ok:
                 return True
             log.warning("sendPhoto не вдався, надсилаю текстом")
@@ -39,6 +75,7 @@ class Telegram:
             "text": text[:4096],
             "parse_mode": "HTML",
             "disable_web_page_preview": True,
+            **extra,
         })
 
     def _call(self, method: str, payload: dict[str, Any]) -> bool:
@@ -253,6 +290,87 @@ def recent_chats() -> list[dict[str, Any]]:
     return list(found.values())
 
 
+def poll_marks(offset: int | None = None) -> tuple[list[dict[str, Any]], int | None]:
+    """Зчитує натискання кнопок і повертає (позначки, новий offset).
+
+    Чому це працює без вебхука й без постійного процесу. Скрапер — це разова
+    джоба, але Telegram тримає непідтверджені апдейти близько доби, тож
+    наступний прогін (їх чотири на годину) спокійно їх забирає. Той самий
+    `getUpdates`, яким уже користується `--find-chat`.
+
+    `offset` — до якого update_id уже прочитано. Підтвердження відбувається
+    наступним викликом з offset = last_id + 1, тому апдейт, який ми прочитали,
+    але не встигли зберегти, Telegram віддасть ще раз. Це навмисно: краще
+    обробити двічі (позначка ідемпотентна), ніж загубити.
+
+    ⚠ 409 від Telegram означає, що на бота навішано вебхук — тоді getUpdates
+    мовчить. Лікується `deleteWebhook`.
+    """
+    token = _clean(os.getenv("TELEGRAM_BOT_TOKEN"))
+    if not token:
+        return [], offset
+    params: dict[str, Any] = {"timeout": 0, "allowed_updates": '["callback_query"]'}
+    if offset is not None:
+        params["offset"] = int(offset)
+    try:
+        r = requests.get(TG_API.format(token=token, method="getUpdates"),
+                         params=params, timeout=30)
+        data = r.json()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Не вдалось прочитати натискання: %s", exc)
+        return [], offset
+    if not data.get("ok"):
+        log.warning("getUpdates: %s", str(data)[:200])
+        return [], offset
+
+    marks: list[dict[str, Any]] = []
+    last: int | None = offset
+    for upd in data.get("result") or []:
+        last = int(upd.get("update_id", 0)) + 1
+        cq = upd.get("callback_query") or {}
+        payload = str(cq.get("data") or "")
+        if not payload.startswith(MARK_RU_PREFIX):
+            continue
+        msg = cq.get("message") or {}
+        marks.append({
+            "ad_id": payload[len(MARK_RU_PREFIX):],
+            "callback_id": cq.get("id"),
+            "chat_id": (msg.get("chat") or {}).get("id"),
+            "message_id": msg.get("message_id"),
+        })
+    return marks, last
+
+
+def confirm_mark(mark: dict[str, Any], text: str = "Позначено як російське") -> None:
+    """Прибирає «годинник» на кнопці й міняє її на підпис.
+
+    Без `answerCallbackQuery` Telegram крутить спінер на кнопці до хвилини, і
+    виглядає це як зависла кнопка. Ні один зі щаблів не критичний, тож усе в
+    try/except: позначку вже збережено, а косметика не сміє валити прогін.
+    """
+    token = _clean(os.getenv("TELEGRAM_BOT_TOKEN"))
+    if not token:
+        return
+    try:
+        requests.post(TG_API.format(token=token, method="answerCallbackQuery"),
+                      data={"callback_query_id": mark.get("callback_id"), "text": text},
+                      timeout=15)
+    except Exception as exc:  # noqa: BLE001
+        log.debug("answerCallbackQuery: %s", exc)
+    if not (mark.get("chat_id") and mark.get("message_id")):
+        return
+    try:
+        requests.post(
+            TG_API.format(token=token, method="editMessageReplyMarkup"),
+            data={"chat_id": mark["chat_id"], "message_id": mark["message_id"],
+                  "reply_markup": json.dumps({"inline_keyboard": [[
+                      {"text": "🚫 позначено російським",
+                       "callback_data": "noop"}]]})},
+            timeout=15)
+    except Exception as exc:  # noqa: BLE001
+        log.debug("editMessageReplyMarkup: %s", exc)
+
+
 def _clean(value: str | None) -> str:
     return (value or "").strip().strip('"').strip("'").strip()
 
@@ -303,16 +421,23 @@ def dispatch(channels: list[Any], messages: list[str]) -> int:
     """
     if not messages:
         return 0
-    overflow = len(messages) - MAX_MESSAGES_PER_RUN
-    to_send = messages[:MAX_MESSAGES_PER_RUN]
+    # Повідомлення буває рядком (пульс, звіти) або Message з id оголошення.
+    items = [m if isinstance(m, Message) else Message(m) for m in messages]
+    overflow = len(items) - MAX_MESSAGES_PER_RUN
+    to_send = items[:MAX_MESSAGES_PER_RUN]
     if overflow > 0:
-        to_send.append(f"… і ще <b>{overflow}</b> збігів цього разу (звузьте фільтри або зменште інтервал).")
+        to_send.append(Message(
+            f"… і ще <b>{overflow}</b> збігів цього разу (звузьте фільтри або зменште інтервал)."))
 
     failed = 0
     for ch in channels:
         if isinstance(ch, Telegram):
             for msg in to_send:
-                if not ch.send(msg):
+                # `keyboard` передаємо лише коли кнопка справді є: інакше
+                # будь-який інший канал із сигнатурою send(text, *, photo)
+                # зламався б на незнайомому аргументі.
+                extra = {"keyboard": mark_keyboard(msg.mark_id)} if msg.mark_id else {}
+                if not ch.send(str(msg), **extra):
                     failed += 1
                 time.sleep(1.2)  # Telegram: ~30 повідомлень/сек загалом, 1/сек у чат
         elif isinstance(ch, Email):
