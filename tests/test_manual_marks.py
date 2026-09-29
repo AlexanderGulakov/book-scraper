@@ -81,7 +81,34 @@ def test_marked_ad_is_never_considered_again():
 
 
 def test_button_is_attached_only_to_ad_messages():
-    ad_msg = notify.Message("🆕 Нове оголошення", mark_id="77")
     plain = notify.Message("Пульс: живий")
-    assert notify.mark_keyboard(ad_msg.mark_id)["inline_keyboard"][0][0]["callback_data"] == "ru:77"
-    assert plain.mark_id is None
+    assert plain.mark_id is None and plain.cheap_id is None
+    assert notify.mark_keyboard(plain.mark_id, plain.cheap_id) is None
+
+
+def test_both_ads_in_a_notification_can_be_marked():
+    """Головне тут: російським буває САМЕ «найдешевше зараз», а не оголошення,
+    про яке прийшло сповіщення. Перша версія вішала одну кнопку на оголошення
+    й позначила б українське видання за 350 замість російського за 50."""
+    kb = notify.mark_keyboard("88", "77")
+    data = [b["callback_data"] for b in kb["inline_keyboard"][0]]
+    assert data == ["ru:88", "ru:77"]
+
+
+def test_no_second_button_when_the_cheapest_is_the_ad_itself():
+    kb = notify.mark_keyboard("88", "88")
+    assert len(kb["inline_keyboard"][0]) == 1
+
+
+def test_clicking_one_button_leaves_the_other():
+    """Натиснути можуть обидві кнопки поспіль. Якщо після першого натискання
+    підмінити всю клавіатуру підписом, друга зникне назавжди."""
+    kb = notify.mark_keyboard("88", "77")
+    after = notify._keyboard_after_click({"data": "ru:77", "markup": kb})
+    left = [b["callback_data"] for row in after["inline_keyboard"] for b in row]
+    assert "ru:88" in left, "друга кнопка має лишитись"
+    assert "ru:77" not in left, "натиснута — зникнути"
+
+    again = notify._keyboard_after_click({"data": "ru:88", "markup": after})
+    rows = again["inline_keyboard"]
+    assert sum(len(r) for r in rows) == 1, "галочка має бути одна, а не дві"

@@ -743,10 +743,11 @@ def run(cfg: dict[str, Any], state: dict[str, Any], *, dry_run: bool,
 
             if prev is None:
                 if d.notify and not first_run and ad.id not in announced:
+                    cheap = _cheapest(cfg, cheap_map, name, ad)
                     messages.append(notify.Message(notify.format_event(
                         "new", name, ad, verdict=_verdict(cfg, prof_map, name, ad),
-                        mark=d.tag, cheapest=_cheapest(cfg, cheap_map, name, ad)),
-                        mark_id=ad.id))
+                        mark=d.tag, cheapest=cheap),
+                        mark_id=ad.id, cheap_id=(cheap or {}).get("id")))
                     announced.add(ad.id)
                     new_cnt += 1
                 elif not d.notify:
@@ -761,11 +762,12 @@ def run(cfg: dict[str, Any], state: dict[str, Any], *, dry_run: bool,
                     and ad.price < old * (1 - threshold)
                 )
                 if cheaper and ad.id not in announced:
+                    cheap = _cheapest(cfg, cheap_map, name, ad)
                     messages.append(notify.Message(notify.format_event(
                         "drop", name, ad, old_price=old,
                         verdict=_verdict(cfg, prof_map, name, ad), mark=d.tag,
-                        cheapest=_cheapest(cfg, cheap_map, name, ad)),
-                        mark_id=ad.id))
+                        cheapest=cheap),
+                        mark_id=ad.id, cheap_id=(cheap or {}).get("id")))
                     announced.add(ad.id)
                     drop_cnt += 1
 

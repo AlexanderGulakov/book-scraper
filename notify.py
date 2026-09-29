@@ -29,27 +29,45 @@ class Message(str):
     тестів на `"текст" in msg` — а зламати розсилку заради однієї кнопки було б
     погано.
 
-    `mark_id` — id оголошення, до якого чіпляти кнопку «російське видання».
-    Немає id — немає кнопки: під пульсом і звітами їй нічого позначати.
+    `mark_id` — id САМОГО оголошення, `cheap_id` — id того, що показане в
+    рядку «найдешевше зараз». Немає id — немає відповідної кнопки: під пульсом
+    і звітами їм нічого позначати.
     """
 
     mark_id: str | None
+    cheap_id: str | None
 
-    def __new__(cls, text: str, mark_id: str | None = None) -> "Message":
+    def __new__(cls, text: str, mark_id: str | None = None,
+                cheap_id: str | None = None) -> "Message":
         obj = super().__new__(cls, text)
         obj.mark_id = mark_id
+        obj.cheap_id = cheap_id
         return obj
 
 
 MARK_RU_PREFIX = "ru:"
 
 
-def mark_keyboard(ad_id: str) -> dict[str, Any]:
-    """Одна кнопка під сповіщенням. `callback_data` ≤ 64 байти — id влазить."""
-    return {"inline_keyboard": [[{
-        "text": "🚫 Це російське видання",
-        "callback_data": f"{MARK_RU_PREFIX}{ad_id}"[:64],
-    }]]}
+def mark_keyboard(ad_id: str | None, cheap_id: str | None = None) -> dict[str, Any] | None:
+    """Кнопки під сповіщенням. `callback_data` ≤ 64 байти — id влазить.
+
+    Дві кнопки, бо російським може виявитись будь-яке з двох оголошень, і це
+    РІЗНІ оголошення. Перша версія вішала одну кнопку на саме оголошення — і
+    це було просто неправильно: у випадку, заради якого все й робилось,
+    російським було «найдешевше зараз», а кнопка позначила б українське
+    видання, про яке прийшло сповіщення.
+
+    Друга кнопка з'являється лише коли рядок «найдешевше» є і вказує на ІНШЕ
+    оголошення.
+    """
+    row = []
+    if ad_id:
+        row.append({"text": "🚫 Це оголошення рос.",
+                    "callback_data": f"{MARK_RU_PREFIX}{ad_id}"[:64]})
+    if cheap_id and cheap_id != ad_id:
+        row.append({"text": "🚫 Найдешевше рос.",
+                    "callback_data": f"{MARK_RU_PREFIX}{cheap_id}"[:64]})
+    return {"inline_keyboard": [row]} if row else None
 
 
 def esc(s: Any) -> str:
@@ -337,12 +355,34 @@ def poll_marks(offset: int | None = None) -> tuple[list[dict[str, Any]], int | N
             "callback_id": cq.get("id"),
             "chat_id": (msg.get("chat") or {}).get("id"),
             "message_id": msg.get("message_id"),
+            # Поточна клавіатура приїжджає разом з натисканням — тільки з неї
+            # можна дізнатись, які ще кнопки були під повідомленням.
+            "markup": msg.get("reply_markup"),
+            "data": payload,
         })
     return marks, last
 
 
+def _keyboard_after_click(mark: dict[str, Any]) -> dict[str, Any]:
+    """Та сама клавіатура без натиснутої кнопки, плюс галочка.
+
+    Кнопок під сповіщенням дві, і натиснути можуть обидві: спершу «найдешевше
+    рос.», потім, наприклад, і саме оголошення. Якщо після першого натискання
+    підмінити всю клавіатуру підписом, друга кнопка зникне назавжди.
+    """
+    clicked = str(mark.get("data") or "")
+    rows = ((mark.get("markup") or {}).get("inline_keyboard") or [])
+    # Викидаємо і натиснуту кнопку, і галочку з попереднього натискання —
+    # інакше після другого кліку їх стане дві.
+    kept = [[b for b in row
+             if b.get("callback_data") not in (clicked, "noop")] for row in rows]
+    kept = [row for row in kept if row]
+    kept.append([{"text": "✓ позначено російським", "callback_data": "noop"}])
+    return {"inline_keyboard": kept}
+
+
 def confirm_mark(mark: dict[str, Any], text: str = "Позначено як російське") -> None:
-    """Прибирає «годинник» на кнопці й міняє її на підпис.
+    """Прибирає «годинник» на кнопці й лишає решту кнопок на місці.
 
     Без `answerCallbackQuery` Telegram крутить спінер на кнопці до хвилини, і
     виглядає це як зависла кнопка. Ні один зі щаблів не критичний, тож усе в
@@ -363,9 +403,7 @@ def confirm_mark(mark: dict[str, Any], text: str = "Позначено як ро
         requests.post(
             TG_API.format(token=token, method="editMessageReplyMarkup"),
             data={"chat_id": mark["chat_id"], "message_id": mark["message_id"],
-                  "reply_markup": json.dumps({"inline_keyboard": [[
-                      {"text": "🚫 позначено російським",
-                       "callback_data": "noop"}]]})},
+                  "reply_markup": json.dumps(_keyboard_after_click(mark))},
             timeout=15)
     except Exception as exc:  # noqa: BLE001
         log.debug("editMessageReplyMarkup: %s", exc)
@@ -436,7 +474,8 @@ def dispatch(channels: list[Any], messages: list[str]) -> int:
                 # `keyboard` передаємо лише коли кнопка справді є: інакше
                 # будь-який інший канал із сигнатурою send(text, *, photo)
                 # зламався б на незнайомому аргументі.
-                extra = {"keyboard": mark_keyboard(msg.mark_id)} if msg.mark_id else {}
+                kb = mark_keyboard(msg.mark_id, msg.cheap_id)
+                extra = {"keyboard": kb} if kb else {}
                 if not ch.send(str(msg), **extra):
                     failed += 1
                 time.sleep(1.2)  # Telegram: ~30 повідомлень/сек загалом, 1/сек у чат
