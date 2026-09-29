@@ -518,12 +518,20 @@ def _cheapest(cfg: dict[str, Any], cheap_map: dict[str, Any], watch_name: str,
         return None
 
 
-def daily_book_report(cfg: dict[str, Any], state: dict[str, Any]) -> list[str]:
+def daily_book_report(cfg: dict[str, Any], state: dict[str, Any],
+                      *, store: Any = None) -> list[str]:
     """Раз на добу — один звіт «за скільки що беруть». Без мережі, лише стан."""
     opt = {**analytics.DEFAULTS, **(cfg.get("defaults") or {})}
     if not opt.get("analytics_enabled", True):
         return []
     if not analytics.report_due(state, opt):
+        return []
+    # Та сама заявка, що й для звіту про зняті: два незалежні прогони над
+    # однією базою інакше надішлють денний звіт двічі.
+    today = analytics._to_local(datetime.now(timezone.utc),
+                               str(opt.get("daily_report_tz", "Europe/Kyiv"))).date().isoformat()
+    if store is not None and not store.claim("book_report_date", today):
+        log.info("Денний звіт уже застовпив інший прогін — мовчу")
         return []
     text = analytics.build_report(cfg, state, esc=notify.esc)
     # Позначаємо день як відзвітований у будь-якому разі: інакше порожній
@@ -549,7 +557,18 @@ def heartbeat_due(opt: dict[str, Any], ws: dict[str, Any]) -> bool:
 
 
 def run(cfg: dict[str, Any], state: dict[str, Any], *, dry_run: bool,
-        only: list[str] | None = None, skip: list[str] | None = None) -> tuple[list[str], int]:
+        only: list[str] | None = None, skip: list[str] | None = None,
+        store: Any = None, reports: bool = True) -> tuple[list[str], int]:
+    """`store` потрібен лише для заявки на звіти (див. `Store.claim`).
+
+    `reports=False` вимикає обидва глобальні звіти — про зняті з продажу і
+    денний про ціни. Пульс watch'ів це НЕ зачіпає: він належить конкретному
+    пошуку, а не прогону, і домашній Букфлі має про себе звітувати.
+
+    Без нього — стара поведінка «перевірив мітку в стані й пішов»: цього
+    достатньо для тестів і для одного процесу, але не там, де над однією базою
+    працюють два незалежні прогони.
+    """
     defaults = cfg.get("defaults", {}) or {}
     session = olx.build_session()
     messages: list[str] = []
@@ -835,7 +854,12 @@ def run(cfg: dict[str, Any], state: dict[str, Any], *, dry_run: bool,
     # Раз на годину — звіт про зняті оголошення. У dry-run не чіпаємо: він
     # видаляє записи зі стану, а «показати й нічого не змінити» тут не вийде.
     every = defaults.get("sold_report_minutes", 60)
-    if every and not dry_run and due({"last_run": state.get("sold_report_last")}, every):
+    # Заявка, а не перевірка: між «час настав» і збереженням мітки минає
+    # півтори хвилини, і за цей час устигає стартувати другий прогін.
+    # `store.claim()` робить перевірку й запис однією операцією.
+    if every and reports and not dry_run \
+            and due({"last_run": state.get("sold_report_last")}, every) \
+            and (store is None or store.claim("sold_report_last", now)):
         try:
             messages.extend(sold_report(
                 cfg, state, session,
@@ -850,11 +874,14 @@ def run(cfg: dict[str, Any], state: dict[str, Any], *, dry_run: bool,
 
     # Раз на добу — аналітика цін. Вона рахується зі стану, тому нічого не
     # питає в OLX і не залежить від того, чи вдався цей конкретний прогін.
-    if not dry_run:
+    if reports and not dry_run:
         try:
-            messages.extend(daily_book_report(cfg, state))
+            messages.extend(daily_book_report(cfg, state, store=store))
         except Exception as exc:  # noqa: BLE001
             log.warning("Денний звіт про ціни не склався: %s", exc)
+
+    if not reports:
+        log.info("Звіти вимкнені (--no-reports): їх складає інший прогін")
 
     if dry_run and messages:
         log.info("--dry-run: %s повідомлень НЕ надіслано:\n%s", len(messages), "\n---\n".join(messages))
@@ -968,6 +995,9 @@ def main() -> int:
     ap.add_argument("--reset", action="store_true", help="забути стан (наступний запуск буде seed)")
     ap.add_argument("--test-notify", action="store_true",
                     help="надіслати тестове повідомлення в канали й вийти (нічого не сканує)")
+    ap.add_argument("--no-reports", action="store_true",
+                    help="не складати звіт про зняті й денний звіт цін — "
+                         "їх бере на себе інший прогін")
     ap.add_argument("--mark-ru", metavar="ID|URL", action="append", default=[],
                     help="позначити оголошення російським вручну (без Telegram)")
     ap.add_argument("--explain", metavar="URL",
@@ -1070,7 +1100,9 @@ def main() -> int:
         log.info("Цього разу перевіряю %s з %s: %s", len(selected), len(cfg["watches"]),
                  ", ".join(str(w.get("name") or "?") for w in selected) or "нічого")
 
-    messages, errors = run(cfg, state, dry_run=args.dry_run, only=args.only, skip=args.skip)
+    messages, errors = run(cfg, state, dry_run=args.dry_run, only=args.only,
+                           skip=args.skip, store=store,
+                           reports=not args.no_reports)
 
     channels = notify.build_channels(cfg)
     undelivered = 0

@@ -95,6 +95,11 @@ class JsonStore:
             encoding="utf-8",
         )
 
+    def claim(self, field: str, not_before: str) -> bool:
+        """Файлове сховище — один процес, тож гонки немає: просто порівняння."""
+        current = str((self._snapshot or {}).get(field) or "")
+        return current < not_before
+
     def reset(self) -> dict[str, Any]:
         """`--reset`: забути все. Як і було — файл перезапишеться цілком."""
         return empty_state()
@@ -269,6 +274,35 @@ class MongoStore:
         # на місці, і поверхнева копія показала б «змін немає».
         self._snapshot = copy.deepcopy(state)
         return state
+
+    def claim(self, field: str, not_before: str) -> bool:
+        """Атомарно «застовпити» звіт: True дістається рівно одному прогону.
+
+        Навіщо. Звіти гейтились читанням `state["sold_report_last"]` і записом
+        наприкінці прогону. Між цими двома моментами — півтори хвилини, і якщо
+        за цей час стартував другий прогін, він бачив ще СТАРУ мітку й слав той
+        самий звіт удруге. Прогонів у нас два незалежні: OLX у GitHub Actions і
+        Букфлі вдома Планувальником Windows — вони нічим не пов'язані, а звіти
+        обидва рахують з однієї бази. Саме так 2026-09-29 «Зняті з продажу»
+        прийшли о 16:04 і 16:05 однаковим текстом.
+
+        `find_one_and_update` з умовою робить перевірку й запис однією
+        операцією, тож другий прогін дістає None і мовчить.
+        """
+        try:
+            doc = self.db.meta.find_one_and_update(
+                {"_id": "state",
+                 "$or": [{field: {"$lt": not_before}}, {field: {"$exists": False}}]},
+                {"$set": {field: not_before}},
+                upsert=True,
+            )
+        except Exception as exc:  # noqa: BLE001
+            # Сховище лягло — краще промовчати, ніж надіслати дубль.
+            log.warning("Не вдалось застовпити «%s»: %s", field, exc)
+            return False
+        # None означає, що документ щойно створив upsert (мітки не було) —
+        # це теж наша заявка.
+        return doc is None or str(doc.get(field) or "") < not_before
 
     def reset(self) -> dict[str, Any]:
         """`--reset`: забути побачені оголошення, але НЕ історію.

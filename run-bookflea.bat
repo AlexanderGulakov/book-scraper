@@ -29,6 +29,12 @@ where py >nul 2>nul && (set PY=py -3) || (set PY=python)
 if not exist logs mkdir logs
 
 rem --only bookflea : OLX searches are handled by GitHub Actions
+rem --no-reports    : the "sold out" and daily price reports are global - they
+rem                   walk the WHOLE state, not just this run's watches. Until
+rem                   2026-09-29 both runners built them, and when the two
+rem                   overlapped the same report arrived twice (16:04 and
+rem                   16:05). GitHub Actions owns them now; this run only
+rem                   scrapes Bookflea. Saves ~45s here every 30 minutes too.
 rem --storage mongo : state lives in MongoDB Atlas now, shared with the cloud.
 rem                   The old separate state.local.json is gone: with
 rem                   document-level writes both writers touch different
@@ -36,6 +42,6 @@ rem                   documents, so there is nothing left to overwrite.
 rem                   "mongo" and not "auto" on purpose - if MONGODB_URI is
 rem                   missing from .env the run must fail loudly instead of
 rem                   quietly starting a second, local state file.
-%PY% main.py --only bookflea --storage mongo >> "logs\bookflea.log" 2>&1
+%PY% main.py --only bookflea --no-reports --storage mongo >> "logs\bookflea.log" 2>&1
 
-echo --- %date% %time% exit=%errorlevel% >> "logs\bookflea.log"
+echo --- %date% %time% exit=%errorlevel% >> "logs\bookflea.log"
