@@ -48,6 +48,68 @@ def read_list(path: Path) -> list[tuple[str, str | None]]:
     return out
 
 
+def check_one(state: dict, raw: str) -> int:
+    """Усе, що база знає про одне оголошення, одним екраном.
+
+    Навіщо окрема команда, коли є Studio 3T. Стан розкиданий по чотирьох
+    місцях, і щоб відповісти на просте «чи враховується це оголошення», треба
+    зазирнути в кожне: `meta.manual_ru` (ручна позначка), `ads` (прапорець
+    `an` у КОЖНОМУ watch'і, бо оголошення бачать кілька пошуків), `dropped`
+    на watch'і і `sold`. Запит руками в чотири колекції — це чотири нагоди
+    помилитись, і саме на такій помилці легко вирішити, що позначка не
+    спрацювала, хоча вона спрацювала в іншому watch'і.
+    """
+    ad_id = olx.ad_id_from(raw)
+    if ad_id is None:
+        print(f"Не розпізнав оголошення: {raw}")
+        return 2
+    print(f"Оголошення {ad_id}" + (f"  ← {raw}" if raw != ad_id else ""))
+
+    mark = (state.get("manual_ru") or {}).get(ad_id)
+    if mark is None:
+        print("  ручна позначка: немає")
+    else:
+        why = mark.get("why", "ru") if isinstance(mark, dict) else "ru"
+        when = (mark.get("at") if isinstance(mark, dict) else str(mark)) or ""
+        label = {"ru": "російське видання", "bad": "недійсне"}.get(why, why)
+        print(f"  ручна позначка: {label}  ({when[:19]})")
+
+    found = False
+    for wname, ws in (state.get("watches") or {}).items():
+        rec = (ws.get("ads") or {}).get(ad_id)
+        dropped = ad_id in (ws.get("dropped") or {})
+        if rec is None and not dropped:
+            continue
+        found = True
+        print(f"\n  watch «{wname}»")
+        if rec is None:
+            print("    у списку оголошень: немає (лише у відкинутих)")
+        else:
+            an = rec.get("an")
+            print(f"    ціна: {rec.get('price')} {rec.get('cur') or ''}")
+            print(f"    назва: {str(rec.get('title') or '')[:70]}")
+            print(f"    в аналітиці: {'НІ (an: false)' if an is False else 'так'}")
+            print(f"    останній раз у видачі: {str(rec.get('seen') or '—')[:19]}")
+            if rec.get("miss"):
+                print(f"    зникло з видачі: {str(rec['miss'])[:19]}")
+            if rec.get("created"):
+                print(f"    створене на OLX: {str(rec['created'])[:19]}")
+        print(f"    у відкинутих (dropped): {'так' if dropped else 'ні'}")
+
+    hits = [s for s in (state.get("sold") or []) if str(s.get("id")) == ad_id]
+    for s in hits:
+        found = True
+        print(f"\n  історія зняття: {str(s.get('gone') or '')[:19]} · "
+              f"{s.get('price')} {s.get('cur') or ''} · "
+              f"провисіло {s.get('days')} дн. · watch «{s.get('watch')}»"
+              + ("  [поза статистикою]" if s.get("an") is False else ""))
+
+    if not found:
+        print("\n  У стані його немає взагалі: або не потрапляло в жоден пошук, "
+              "або вже прибране (prune_days).")
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -59,6 +121,10 @@ def main() -> int:
                     help="причина: bad — недійсне (типово), ru — російське видання")
     ap.add_argument("--list", action="store_true",
                     help="показати, що вже викреслено, і вийти")
+    ap.add_argument("--check", metavar="ID|URL",
+                    help="показати все, що база знає про одне оголошення")
+    ap.add_argument("--undo", metavar="ID|URL", action="append", default=[],
+                    help="скасувати позначку (випадково натиснув кнопку в ТГ)")
     ap.add_argument("--storage", choices=["auto", "json", "mongo"], default="auto")
     ap.add_argument("--state", type=Path, default=Path("state.json"))
     ap.add_argument("--mongo-uri", default=None)
@@ -75,6 +141,25 @@ def main() -> int:
                                uri=args.mongo_uri, db_name=args.mongo_db)
     state = store.load()
     flagged = state.get("manual_ru") or {}
+
+    if args.check:
+        return check_one(state, args.check)
+
+    if args.undo:
+        ids, bad = [], []
+        for raw in args.undo:
+            ad_id = olx.ad_id_from(raw)
+            (ids if ad_id else bad).append(ad_id or raw)
+        for raw in bad:
+            print(f"  ✖ не розпізнав: {raw}")
+        n = watcher.restore_ads(state, ids)
+        store.save(state)
+        print(f"Знято позначок: {n}. Лишилось у базі: "
+              f"{len(state.get('manual_ru') or {})}.")
+        if n:
+            print("Оголошення повернеться в статистику наступним прогоном, "
+                  "щойно його знову побачать у видачі.")
+        return 1 if bad else 0
 
     if args.list:
         print(f"Викреслено оголошень: {len(flagged)}")

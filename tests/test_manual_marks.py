@@ -216,3 +216,117 @@ def test_the_file_tool_reads_links_ids_and_comments(tmp_path):
         "сміття\n", encoding="utf-8")
     rows = exclude.read_list(f)
     assert [r[1] for r in rows] == ["936150588", "936373155", None]
+
+
+def test_check_shows_every_place_the_ad_lives(capsys):
+    """Стан розкиданий по чотирьох місцях, і «чи враховується це оголошення»
+    не читається з жодного окремо. Команда має показати всі одразу — зокрема
+    розбіжність, коли позначка лягла в один watch і не лягла в інший."""
+    import exclude
+    state = {
+        "manual_ru": {"42": {"at": "2026-09-30T06:00:00+00:00", "why": "bad"}},
+        "watches": {
+            "А": {"ads": {"42": {"price": 100.0, "cur": "UAH", "an": False,
+                                 "title": "Книжка"}},
+                  "dropped": {"42": "2026-09-30T06:00:00+00:00"}},
+            "Б": {"ads": {"42": {"price": 100.0, "cur": "UAH", "title": "Книжка"}}},
+        },
+        "sold": [{"id": "42", "watch": "А", "price": 100.0, "days": 3.0,
+                  "gone": "2026-09-30T07:00:00+00:00"}],
+    }
+    assert exclude.check_one(state, "42") == 0
+    out = capsys.readouterr().out
+    assert "недійсне" in out
+    assert "watch «А»" in out and "watch «Б»" in out
+    assert "НІ (an: false)" in out, "де позначка лягла"
+    assert "історія зняття" in out
+
+
+def test_check_says_plainly_when_there_is_nothing():
+    """«Нічого не знайшов» — теж відповідь, і краща за порожній екран, з якого
+    незрозуміло, чи то оголошення чисте, чи то команда не спрацювала."""
+    import exclude
+    assert exclude.check_one({"watches": {}}, "42") == 0
+    assert exclude.check_one({"watches": {}}, "сміття") == 2
+
+
+# ─────────────────────────────────────────── скасувати випадкове натискання
+
+def test_undo_brings_the_ad_back():
+    """Кнопка велика, палець один — натиснути не те легко. Скасування має
+    повернути оголошення рівно туди, де воно було."""
+    import main
+    state = _state_with_ad()
+    main.exclude_ads(state, ["42"], why="bad")
+    assert main.restore_ads(state, ["42"]) == 1
+
+    assert "42" not in state["manual_ru"]
+    for ws in state["watches"].values():
+        assert "an" not in ws["ads"]["42"], "знову рахується"
+        assert "42" not in (ws.get("dropped") or {})
+    assert "an" not in state["sold"][0]
+
+
+def test_undo_does_not_resurrect_what_the_rules_killed():
+    """🔑 `an: false` ставить ще й шар правил — комплектам і лотам без ціни.
+    Якщо скасування зніме його наосліп, комплект за 1100 грн потрапить у
+    медіану окремих книжок і зіпсує її. Тому позначка пам'ятає, чи оголошення
+    рахувалось ДО неї."""
+    import main
+    state = _state_with_ad()
+    for ws in state["watches"].values():
+        ws["ads"]["42"]["an"] = False          # так вирішили правила, не людина
+    main.exclude_ads(state, ["42"], why="ru")
+    assert state["manual_ru"]["42"]["an0"] is False
+
+    main.restore_ads(state, ["42"])
+    for ws in state["watches"].values():
+        assert ws["ads"]["42"]["an"] is False, "правила лишаються в силі"
+
+
+def test_undo_of_something_unmarked_changes_nothing():
+    import main
+    state = _state_with_ad()
+    assert main.restore_ads(state, ["42"]) == 0
+
+
+# ─────────────────────────────────────────── дубль із двох пошуків
+
+class _Ad:
+    def __init__(self, ad_id, price):
+        self.id, self.price = ad_id, price
+
+
+def test_the_same_ad_is_announced_once_across_runs():
+    """Реальні дублі 30.09: одне оголошення за 500 грн приїхало о 16:23 від
+    «Поттер: Філософський камінь» і о 16:31 від «Гаррі Поттер». Набір
+    `announced` цього не ловив — він жив лише в межах прогону, а watch'і мають
+    різні інтервали й зустрічають оголошення в різних прогонах."""
+    import main
+    state: dict = {}
+    ad = _Ad("500", 500.0)
+    assert main.told_before(state, ad, "new") is False
+    main.remember_told(state, ad, "2026-09-30T16:23:00+00:00")
+    assert main.told_before(state, ad, "new") is True
+
+
+def test_a_further_price_drop_is_still_worth_a_message():
+    """Але здешевлення — окрема подія: мовчати про неї тільки тому, що про
+    оголошення вже казали, означало б проґавити саме те, заради чого стежимо."""
+    import main
+    state: dict = {}
+    main.remember_told(state, _Ad("500", 500.0), "2026-09-30T16:23:00+00:00")
+    assert main.told_before(state, _Ad("500", 500.0), "drop") is True, "та сама ціна"
+    assert main.told_before(state, _Ad("500", 400.0), "drop") is False, "подешевшало"
+
+
+def test_memory_of_messages_expires_like_the_ads_themselves():
+    """Інакше мапа росла б вічно: за рік це десятки тисяч записів у одному
+    документі meta."""
+    import main
+    state = {"told": {
+        "old": {"at": "2020-01-01T00:00:00+00:00", "price": 1.0},
+        "new": {"at": "2026-09-30T00:00:00+00:00", "price": 2.0},
+    }}
+    assert main.prune_told(state, 30) == 1
+    assert list(state["told"]) == ["new"]

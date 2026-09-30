@@ -494,7 +494,13 @@ def exclude_ads(state: dict[str, Any], ids: Iterable[str], *, why: str = "bad",
         # Старі записи — просто рядок з датою, і це означало «російське».
         # Не переписуємо їх: причина, вказана раніше, точніша за здогад.
         if ad_id not in flagged:
-            flagged[ad_id] = {"at": now, "why": why}
+            # `an0` — чи рахувалось оголошення ДО позначки. Потрібне рівно для
+            # одного: щоб `restore_ads` умів відкотити випадкове натискання, не
+            # втягнувши назад комплект, якому `an: false` поставили правила.
+            was = [(ws.get("ads") or {}).get(ad_id) for ws in
+                   (state.get("watches") or {}).values()]
+            countable = any(r is not None and r.get("an") is not False for r in was)
+            flagged[ad_id] = {"at": now, "why": why, "an0": countable}
             n += 1
         # Оголошення живе в кількох watch'ах одразу — гасимо в усіх.
         for ws in (state.get("watches") or {}).values():
@@ -508,6 +514,84 @@ def exclude_ads(state: dict[str, Any], ids: Iterable[str], *, why: str = "bad",
             if str(s.get("id")) == ad_id:
                 s["an"] = False
     return n
+
+
+def restore_ads(state: dict[str, Any], ids: Iterable[str]) -> int:
+    """Скасовує ручну позначку — для випадкового натискання кнопки.
+
+    Дзеркало `exclude_ads`. Прибирає id з `manual_ru` і з `dropped` в усіх
+    watch'ах, і знімає `an: false` — але ЛИШЕ якщо його поставили саме ми.
+
+    Різниця принципова: `an: false` ставить ще й шар правил (комплекти, лоти
+    без ціни), і зняти його наосліп означало б тихо втягнути комплект у
+    медіану окремих книжок. Тому `exclude_ads` запам'ятовує в позначці, чи
+    оголошення рахувалось ДО неї (`an0`), а тут ми лише відкочуємо до того
+    стану.
+    """
+    n = 0
+    flagged: dict[str, Any] = state.setdefault("manual_ru", {})
+    for ad_id in ids:
+        ad_id = str(ad_id or "").strip()
+        mark = flagged.pop(ad_id, None)
+        if mark is None:
+            continue
+        n += 1
+        # Старий формат — просто рядок з датою. Тоді ми ще не запам'ятовували
+        # попередній стан; вважаємо, що оголошення рахувалось, бо саме такі
+        # позначали руками. Наступний прогін однаково перерахує `an` за
+        # правилами, щойно побачить оголошення у видачі.
+        countable = mark.get("an0", True) if isinstance(mark, dict) else True
+        for ws in (state.get("watches") or {}).values():
+            (ws.get("dropped") or {}).pop(ad_id, None)
+            rec = (ws.get("ads") or {}).get(ad_id)
+            if rec is not None and countable:
+                rec.pop("an", None)
+        if countable:
+            for s in state.get("sold") or []:
+                if str(s.get("id")) == ad_id:
+                    s.pop("an", None)
+    return n
+
+
+# --------------------------------------------- про що вже казали в Telegram
+
+def told_before(state: dict[str, Any], ad: Any, kind: str) -> bool:
+    """Чи про це оголошення вже надсилали повідомлення — у БУДЬ-ЯКОМУ прогоні.
+
+    ⚠ Це не те саме, що набір `announced` у межах прогону, і саме на цьому
+    користувач отримував дублі. Стан оголошення тримає КОЖЕН watch окремо, а
+    пошуки навмисне перетинаються: «Гаррі Поттер» і «Поттер: Філософський
+    камінь» бачать ту саму книжку. Поки обидва встигали в один прогін, дубль
+    гасив `announced`. Але watch'і мають різні `interval_minutes`, і другий
+    watch зустрічав оголошення вже наступним прогоном — для нього воно нове,
+    бо `prev is None`. Реальний випадок 30.09: те саме оголошення за 500 грн
+    приїхало о 16:23 («Поттер: Філософський камінь») і о 16:31 («Гаррі Поттер»).
+
+    Здешевлення — окрема подія: про нього кажемо, навіть якщо про саме
+    оголошення вже казали. Але про ОДНУ Й ТУ САМУ ціну — лише раз.
+    """
+    rec = (state.get("told") or {}).get(str(getattr(ad, "id", "")))
+    if rec is None:
+        return False
+    if kind == "new":
+        return True
+    return rec.get("price") == getattr(ad, "price", None)
+
+
+def remember_told(state: dict[str, Any], ad: Any, now: str) -> None:
+    state.setdefault("told", {})[str(getattr(ad, "id", ""))] = {
+        "at": now, "price": getattr(ad, "price", None)}
+
+
+def prune_told(state: dict[str, Any], days: int) -> int:
+    """Забути, про що казали, за тим самим правилом, що й самі оголошення."""
+    told = state.get("told") or {}
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    stale = [k for k, v in told.items()
+             if str((v or {}).get("at") or "") < cutoff]
+    for k in stale:
+        del told[k]
+    return len(stale)
 
 
 def apply_marks(state: dict[str, Any]) -> int:
@@ -719,10 +803,14 @@ def run(cfg: dict[str, Any], state: dict[str, Any], *, dry_run: bool,
     messages: list[str] = []
     errors = 0
     now = datetime.now(timezone.utc).isoformat()
-    # Одне оголошення — одне повідомлення за прогін, навіть якщо його бачать
-    # два пошуки (напр. «кассандра клер» і «знаряддя смерті» перетинаються).
-    # У стані кожного watch воно все одно записується окремо.
-    announced: set[str] = set()
+    # Одне оголошення — одне повідомлення НАЗАВЖДИ, а не за прогін: пошуки
+    # перетинаються навмисне, і другий watch зустрічає ту саму книжку вже
+    # наступним прогоном. Пам'ять про це живе в `state["told"]` — див.
+    # `told_before()`. У стані кожного watch оголошення все одно записується
+    # окремо, бо ціну вони відстежують незалежно.
+    dropped_told = prune_told(state, int(defaults.get("prune_days", 30)))
+    if dropped_told:
+        log.debug("Забув про %s давніх сповіщень", dropped_told)
 
     # Профілі цін рахуємо один раз на прогін — це чиста арифметика над станом,
     # без жодного запиту в мережу. Далі кожне сповіщення про оголошення
@@ -863,7 +951,7 @@ def run(cfg: dict[str, Any], state: dict[str, Any], *, dry_run: bool,
         # користі: `fetch_description` не знайде там __PRERENDERED_STATE__.
         want_desc = bool(opt.get("needs_description")) and source == "olx"
 
-        new_cnt = drop_cnt = skip_cnt = quiet_cnt = 0
+        new_cnt = drop_cnt = skip_cnt = quiet_cnt = dup_cnt = 0
         manual_ru = state.get("manual_ru") or {}
         for ad in kept:
             if ad.id in refused or ad.id in manual_ru:
@@ -907,16 +995,18 @@ def run(cfg: dict[str, Any], state: dict[str, Any], *, dry_run: bool,
                 continue
 
             if prev is None:
-                if d.notify and not first_run and ad.id not in announced:
+                if d.notify and not first_run and not told_before(state, ad, "new"):
                     cheap = cheapest.for_ad(name, ad)
                     messages.append(notify.Message(notify.format_event(
                         "new", name, ad, verdict=_verdict(cfg, prof_map, name, ad),
                         mark=d.tag, cheapest=cheap),
                         mark_id=ad.id, cheap_id=(cheap or {}).get("id")))
-                    announced.add(ad.id)
+                    remember_told(state, ad, now)
                     new_cnt += 1
                 elif not d.notify:
                     quiet_cnt += 1
+                elif d.notify and not first_run:
+                    dup_cnt += 1
             else:
                 old = prev.get("price")
                 threshold = float(opt.get("min_drop_percent", 1)) / 100.0
@@ -926,14 +1016,14 @@ def run(cfg: dict[str, Any], state: dict[str, Any], *, dry_run: bool,
                     and ad.price is not None
                     and ad.price < old * (1 - threshold)
                 )
-                if cheaper and ad.id not in announced:
+                if cheaper and not told_before(state, ad, "drop"):
                     cheap = cheapest.for_ad(name, ad)
                     messages.append(notify.Message(notify.format_event(
                         "drop", name, ad, old_price=old,
                         verdict=_verdict(cfg, prof_map, name, ad), mark=d.tag,
                         cheapest=cheap),
                         mark_id=ad.id, cheap_id=(cheap or {}).get("id")))
-                    announced.add(ad.id)
+                    remember_told(state, ad, now)
                     drop_cnt += 1
 
             prev = prev or {}
@@ -970,6 +1060,8 @@ def run(cfg: dict[str, Any], state: dict[str, Any], *, dry_run: bool,
             ws["seeded"] = True
             log.info("  перший запуск: запам'ятав %s оголошень, сповіщення не слав", len(kept))
         else:
+            if dup_cnt:
+                log.info("  %s вже надсилали з іншого пошуку — мовчу", dup_cnt)
             log.info("  нових: %s, здешевлень: %s, мовчки в базу: %s, відкинуто: %s",
                      new_cnt, drop_cnt, quiet_cnt, skip_cnt)
             # Знахідка сама по собі доводить, що скрапер живий, тож пульс
@@ -1153,6 +1245,11 @@ def main() -> int:
     ap.add_argument("--exclude", metavar="ID|URL", action="append", default=[],
                     help="викреслити оголошення назавжди (не відкривається, "
                          "хибне спрацювання, дивне видання)")
+    ap.add_argument("--unexclude", metavar="ID|URL", action="append", default=[],
+                    help="скасувати ручну позначку (випадково натиснув кнопку)")
+    ap.add_argument("--poll-marks", action="store_true",
+                    help="лише забрати натискання кнопок з Telegram і вийти — "
+                         "без жодного запиту в OLX, секунда роботи")
     ap.add_argument("--explain", metavar="URL",
                     help="чому конкретне оголошення прийшло або не прийшло")
     ap.add_argument("--find-chat", action="store_true",
@@ -1179,6 +1276,41 @@ def main() -> int:
         log.info(".env: підхопив %s", ", ".join(from_env_file))
 
     cfg = load_config(args.config)
+
+    if args.poll_marks:
+        # Окремий режим, бо кнопка в Telegram крутить «годинник», доки хтось не
+        # відповість на натискання, а повний прогін буває раз на 15 хвилин.
+        # Тут немає жодного запиту в OLX, тож це можна ганяти хоч щохвилини з
+        # планувальника — і кнопка почне відповідати одразу.
+        store = storage.open_store(state_path=args.state, mode=args.storage,
+                                   uri=args.mongo_uri, db_name=args.mongo_db)
+        state = store.load()
+        n = apply_marks(state)
+        if n:
+            store.save(state)
+        log.info("Оброблено натискань: %s", n)
+        store.close()
+        return 0
+
+    if args.unexclude:
+        store = storage.open_store(state_path=args.state, mode=args.storage,
+                                   uri=args.mongo_uri, db_name=args.mongo_db)
+        state = store.load()
+        ids = []
+        for raw in args.unexclude:
+            ad_id = olx.ad_id_from(raw)
+            if ad_id is None:
+                log.error("Не розпізнав оголошення: %s", raw)
+                continue
+            ids.append(ad_id)
+        n = restore_ads(state, ids)
+        store.save(state)
+        log.info("Знято позначок: %s. Лишилось у базі: %s",
+                 n, len(state.get("manual_ru") or {}))
+        if n:
+            log.info("Оголошення повернеться в статистику й у «найдешевше зараз» "
+                     "наступним прогоном, щойно його знову побачать у видачі.")
+        return 0
 
     if args.mark_ru or args.exclude:
         # ⚠ Тут стояло `open_store(args, cfg)`, а він приймає лише іменовані
