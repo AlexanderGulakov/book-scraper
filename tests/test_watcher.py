@@ -79,7 +79,11 @@ def test_filters():
 
 def test_first_run_is_silent_then_detects_new_and_drop(monkeypatch, tmp_path=None):
     cfg = {
-        "defaults": {"currency": "UAH", "min_drop_percent": 3},
+        # analytics_enabled: false — цей тест про seed і сповіщення, а не про
+        # денний звіт. З `min_stalled: 1` одне залежане оголошення у фікстурі
+        # складає звіт, і він домішувався до списку повідомлень.
+        "defaults": {"currency": "UAH", "min_drop_percent": 3,
+                     "analytics_enabled": False},
         "watches": [{
             "id": "t", "name": "Тест", "url": "https://www.olx.ua/uk/list/q-test/",
             "max_price": 600, "exclude_keywords": ["копія"], "skip_promoted": True,

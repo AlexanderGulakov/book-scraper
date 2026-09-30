@@ -110,5 +110,109 @@ def test_clicking_one_button_leaves_the_other():
     assert "ru:77" not in left, "натиснута — зникнути"
 
     again = notify._keyboard_after_click({"data": "ru:88", "markup": after})
-    rows = again["inline_keyboard"]
-    assert sum(len(r) for r in rows) == 1, "галочка має бути одна, а не дві"
+    left = [b["callback_data"] for row in again["inline_keyboard"] for b in row]
+    ticks = [c for c in left if c == "noop"]
+    assert len(ticks) == 1, "галочка має бути одна, а не дві"
+    # Кнопки другої причини натискання першої не чіпає: це різні твердження.
+    assert {"bad:88", "bad:77"} <= set(left)
+
+
+def test_the_two_reasons_are_separate_buttons():
+    """«Російське видання» і «не враховувати» дають однаковий наслідок, але це
+    різні причини, і в базі вони мають лягти по-різному."""
+    kb = notify.mark_keyboard("88", "77")
+    rows = kb["inline_keyboard"]
+    assert len(rows) == 2, "по рядку на причину"
+    assert [b["callback_data"] for b in rows[0]] == ["ru:88", "ru:77"]
+    assert [b["callback_data"] for b in rows[1]] == ["bad:88", "bad:77"]
+    # Без «найдешевшого» — по одній кнопці в рядку, а не порожній рядок.
+    solo = notify.mark_keyboard("88")
+    assert [len(r) for r in solo["inline_keyboard"]] == [1, 1]
+
+
+def test_a_click_says_what_it_actually_did():
+    """Підпис галочки бере причину з натискання: сказати «позначено російським»
+    там, де людина натиснула «не враховувати», — це збрехати про зроблене."""
+    kb = notify.mark_keyboard("88")
+    after = notify._keyboard_after_click({"data": "bad:88", "why": "bad", "markup": kb})
+    tick = [b for row in after["inline_keyboard"] for b in row
+            if b["callback_data"] == "noop"][0]
+    assert "не враховується" in tick["text"]
+
+
+# ─────────────────────────────────────────── id з посилання
+
+def test_the_id_in_the_url_is_not_the_id_in_the_data():
+    """Справжній баг: `--mark-ru <посилання>` клав у базу «11lZx2», а стан
+    ключується числом 936150588 — тобто позначка нікуди не потрапляла.
+    У посиланні OLX пише base62 з алфавітом 0-9a-zA-Z."""
+    import olx
+    url = ("https://www.olx.ua/d/uk/obyavlenie/"
+           "prodam-komplekt-knig-garr-potter-ID11lZx2.html")
+    assert olx.ad_id_from(url) == "936150588"
+    assert olx.ad_id_from("11lZx2") == "936150588", "голий код теж має працювати"
+    assert olx.ad_id_from("936150588") == "936150588", "готовий id не чіпаємо"
+    # Не розпізнав — так і кажемо. Мовчки покласти в базу сміття гірше:
+    # виглядатиме, ніби справу зроблено.
+    assert olx.ad_id_from("сміття") is None
+    assert olx.ad_id_from("https://olx.ua/") is None
+    assert olx.ad_id_from("") is None
+
+
+# ─────────────────────────────────────────── викреслити назавжди
+
+def _state_with_ad(ad_id="42"):
+    return {
+        "watches": {
+            "Кідрук": {"ads": {ad_id: {"title": "Колонія", "price": 300.0}}},
+            "Букфлі": {"ads": {ad_id: {"title": "Колонія", "price": 300.0}}},
+        },
+        "sold": [{"id": ad_id, "watch": "Кідрук", "price": 300.0}],
+    }
+
+
+def test_excluding_kills_the_ad_everywhere_at_once():
+    """Оголошення живе в кількох watch'ах одразу — гасити треба в усіх, інакше
+    воно повернеться в статистику з того watch'а, якого не зачепили."""
+    import main
+    state = _state_with_ad()
+    assert main.exclude_ads(state, ["42"], why="bad") == 1
+
+    for ws in state["watches"].values():
+        assert ws["ads"]["42"]["an"] is False
+        assert "42" in ws["dropped"], "і в майбутніх прогонах теж не розглядати"
+    assert state["sold"][0]["an"] is False, "і з історії продажів"
+    assert state["manual_ru"]["42"]["why"] == "bad"
+
+
+def test_excluding_twice_changes_nothing():
+    import main
+    state = _state_with_ad()
+    main.exclude_ads(state, ["42"], why="bad")
+    assert main.exclude_ads(state, ["42"], why="bad") == 0, "нових позначок нема"
+    assert len(state["manual_ru"]) == 1
+
+
+def test_an_old_string_mark_keeps_its_meaning():
+    """Раніше в `manual_ru` лежав просто рядок з датою, і означав «російське».
+    Перезаписати його як «bad» означало б задним числом переписати причину."""
+    import main
+    state = _state_with_ad()
+    state["manual_ru"] = {"42": "2026-09-01T00:00:00+00:00"}
+    main.exclude_ads(state, ["42"], why="bad")
+    assert state["manual_ru"]["42"] == "2026-09-01T00:00:00+00:00"
+
+
+def test_the_file_tool_reads_links_ids_and_comments(tmp_path):
+    """Файл зі списком — це те, що людина збирає тижнями, тож він мусить
+    терпіти коментарі, порожні рядки й будь-який із трьох записів id."""
+    import exclude
+    f = tmp_path / "excluded.txt"
+    f.write_text(
+        "https://www.olx.ua/d/uk/obyavlenie/x-ID11lZx2.html  # не відкривається\n"
+        "\n"
+        "# цілий рядок-коментар\n"
+        "936373155\n"
+        "сміття\n", encoding="utf-8")
+    rows = exclude.read_list(f)
+    assert [r[1] for r in rows] == ["936150588", "936373155", None]

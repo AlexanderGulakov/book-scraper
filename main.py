@@ -16,7 +16,7 @@ import sys
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 import yaml
 
@@ -42,7 +42,7 @@ REQUIRED_API = {
     "bookflea": ["collect"],
     "rules": ["decide", "Decision", "is_russian_text"],
     "analytics": ["profiles", "verdict_for_ad", "build_report", "report_due",
-                  "mark_reported", "book_entry", "cheapest_now"],
+                  "mark_reported", "book_entry", "cheapest_now", "cheapest_ranked"],
     "storage": ["open_store", "empty_state", "JsonStore", "MongoStore"],
 }
 
@@ -326,14 +326,24 @@ def sold_report(cfg: dict[str, Any], state: dict[str, Any], session: Any,
     names = {watch_key(w, i): (w.get("name") or watch_key(w, i))
              for i, w in enumerate(cfg["watches"])}
 
-    # Кандидати: зниклі, найдавніше зниклі — першими.
+    # Кандидати: зниклі, наймолодші оголошення — першими.
     #
-    # ⚠ Довгожителів у чергу не беремо. Оголошення, яке провисіло два тижні,
-    # уже відповіло на своє питання: за ці гроші його не беруть, і чи зняли
-    # його на п'ятнадцятий день — нецікаво. Але сортування «найдавніше зниклі
-    # першими» ставить саме їх на початок черги, і 60 перевірок за прогін
-    # витрачались би на них, поки свіжі оголошення чекають. Для статистики
-    # вони не пропадають: analytics бере їх з іншого боку — як тих, що лежать.
+    # ⚠ Тут двічі міняли правило, і обидва рази через одні й ті самі граблі.
+    # Перша версія сортувала «найдавніше зниклі першими» — і 60 перевірок за
+    # прогін діставались двотижневим лежням, поки свіжі чекали годинами. Це
+    # заткнули порогом `sold_check_max_age_days: 14`, тобто просто викинули
+    # старих із черги.
+    #
+    # Але поріг «зникнення = продаж» тепер 29 днів, і викидання з черги на
+    # 14-му дні означало б, що друга половина цього вікна ніколи не
+    # перевіряється: оголошення, яке провисіло 20 днів і продалось, ніхто б не
+    # спитав, і в `sold` воно б не потрапило взагалі. Тобто поріг мовчки
+    # з'їдав би саме ті продажі, заради яких вікно й розширили.
+    #
+    # Тому черга сортується за ВІКОМ оголошення, а не за часом зникнення:
+    # свіжі попереду (їхнє зникнення найбільше схоже на продаж), старі
+    # добирають рештки бюджету. Старіючи, оголошення саме з'їжджає в хвіст —
+    # і це правильно, бо після 29 днів воно однаково вже не продаж.
     candidates: list[tuple[str, str, dict[str, Any]]] = []
     skipped_old = 0
     for key, ws in state["watches"].items():
@@ -346,7 +356,9 @@ def sold_report(cfg: dict[str, Any], state: dict[str, Any], session: Any,
                     skipped_old += 1
                     continue
             candidates.append((key, ad_id, rec))
-    candidates.sort(key=lambda c: str(c[2].get("miss")))
+    # Молодші вперед; за однакового віку — той, хто зник раніше.
+    candidates.sort(key=lambda c: (_age_days(c[2], now_dt) if _age_days(c[2], now_dt)
+                                   is not None else 1e9, str(c[2].get("miss"))))
     if skipped_old:
         log.info("Звіт про зняті: пропустив %s оголошень старших за %s дн.",
                  skipped_old, max_age_days)
@@ -460,8 +472,46 @@ def keyword_ok(ad: Any, rules: dict[str, Any]) -> bool:
                        exclude=rule.get("exclude") or [])
 
 
+def exclude_ads(state: dict[str, Any], ids: Iterable[str], *, why: str = "bad",
+                now: str | None = None) -> int:
+    """Викреслює оголошення назавжди: ні в статистику, ні в «найдешевше», ні в ТГ.
+
+    Одне місце на всі три входи — кнопка в Telegram, `--mark-ru`/`--exclude` і
+    `exclude.py` зі списком, — щоб вони не розійшлися. Ідемпотентна.
+
+    `why`: "ru" — російське видання, "bad" — недійсне (не відкривається, хибне
+    спрацювання, дивне видання, що ламає статистику). Наслідок однаковий,
+    причина зберігається, бо через місяць інакше не розібрати, чому саме цей
+    запис викинуто.
+    """
+    now = now or datetime.now(timezone.utc).isoformat()
+    flagged: dict[str, Any] = state.setdefault("manual_ru", {})
+    n = 0
+    for ad_id in ids:
+        ad_id = str(ad_id or "").strip()
+        if not ad_id:
+            continue
+        # Старі записи — просто рядок з датою, і це означало «російське».
+        # Не переписуємо їх: причина, вказана раніше, точніша за здогад.
+        if ad_id not in flagged:
+            flagged[ad_id] = {"at": now, "why": why}
+            n += 1
+        # Оголошення живе в кількох watch'ах одразу — гасимо в усіх.
+        for ws in (state.get("watches") or {}).values():
+            rec = (ws.get("ads") or {}).get(ad_id)
+            if rec is not None:
+                rec["an"] = False
+            ws.setdefault("dropped", {})[ad_id] = now
+        # І з історії проданих теж: одне хибне спрацювання в sold зсуває
+        # медіану сильніше, ніж живе оголошення в «лежать».
+        for s in state.get("sold") or []:
+            if str(s.get("id")) == ad_id:
+                s["an"] = False
+    return n
+
+
 def apply_marks(state: dict[str, Any]) -> int:
-    """Забирає з Telegram натискання «це російське видання» і застосовує їх.
+    """Забирає з Telegram натискання кнопок під сповіщенням і застосовує їх.
 
     Навіщо взагалі ручна позначка. Мову видання інколи видно ЛИШЕ з обкладинки:
     опис український, у заголовку ні слова про мову, а книжка російська.
@@ -479,43 +529,137 @@ def apply_marks(state: dict[str, Any]) -> int:
     if not marks:
         return 0
 
-    flagged: dict[str, Any] = state.setdefault("manual_ru", {})
     now = datetime.now(timezone.utc).isoformat()
     for mark in marks:
         ad_id = str(mark.get("ad_id") or "")
         if not ad_id:
             continue
-        flagged.setdefault(ad_id, now)
-        # Оголошення живе в кількох watch'ах одразу — гасимо в усіх.
-        for ws in (state.get("watches") or {}).values():
-            rec = (ws.get("ads") or {}).get(ad_id)
-            if rec is not None:
-                rec["an"] = False
-            ws.setdefault("dropped", {})[ad_id] = now
+        why = str(mark.get("why") or "ru")
+        exclude_ads(state, [ad_id], why=why, now=now)
         try:
             notify.confirm_mark(mark)
         except Exception as exc:  # noqa: BLE001
             log.debug("Не вдалось підтвердити позначку %s: %s", ad_id, exc)
-        log.info("Позначено російським вручну: %s", ad_id)
+        log.info("Викреслено вручну (%s): %s", why, ad_id)
     return len(marks)
 
 
-def _cheapest(cfg: dict[str, Any], cheap_map: dict[str, Any], watch_name: str,
-              ad: Any) -> dict[str, Any] | None:
-    """Найдешевше живе оголошення на ту саму книжку. Теж не валить прогін."""
-    if not cheap_map:
+class CheapestNow:
+    """Рядок «найдешевше зараз» — з перевіркою, що посилання ще живе.
+
+    Навіщо взагалі перевірка. Індекс рахується зі стану, а стан відстає: його
+    зібрано на початку прогону, тобто за підсумками ПОПЕРЕДНЬОГО. Плюс саме
+    посилання продавець може зняти між нашим запитом і нашим повідомленням.
+    Виходило, що під свіжим оголошенням за 175 грн стояло «найдешевше: 150»,
+    яке на момент приходу повідомлення вже не відкривалось (реальний випадок
+    2026-09-30). Мертве посилання гірше за відсутність рядка: воно не просто не
+    допомагає, воно бреше про ціну на ринку.
+
+    Скільки це коштує. Один GET на кандидата, і тільки тоді, коли рядок справді
+    їде в повідомленні — тобто кілька запитів на прогін, а не на кожне
+    оголошення в базі. Вердикти кешуються в межах прогону, бюджет обмежений
+    (`cheapest_verify_max`), а `unknown` (мережа підвела) вважається живим:
+    краще показати рядок під сумнівом, ніж мовчати через тайм-аут.
+
+    Що робить зі знятим. Не просто пропускає, а ховає: прибирає зі стану й
+    кладе в `sold`. Це той самий висновок, який зробив би звіт про зняті, тільки
+    отриманий раніше й безкоштовно — а для оголошень, старших за
+    `sold_check_max_age_days`, взагалі єдиний, бо туди звіт не заглядає.
+    """
+
+    def __init__(self, cfg: dict[str, Any], state: dict[str, Any], session: Any,
+                 *, verify: bool = True, budget: int = 12, depth: int = 3,
+                 timeout: int = 20) -> None:
+        self.cfg = cfg
+        self.state = state
+        self.session = session
+        self.verify = bool(verify) and session is not None
+        self.left = int(budget)
+        self.depth = max(1, int(depth))
+        self.timeout = int(timeout)
+        self.checked: dict[str, bool] = {}   # id → живе
+        self.buried = 0
+        try:
+            # Зниклих із видачі беремо в чергу лише коли є чим їх перевірити:
+            # `miss` означає «його не було на наших сторінках», а не «знято» —
+            # старе оголошення просто виштовхують свіжі. Перевірка розрізняє ці
+            # два випадки, а без неї лишається тільки не показувати.
+            self.ranked = analytics.cheapest_ranked(cfg, state,
+                                                    include_missing=self.verify)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Не вдалось порахувати найдешевші ціни: %s", exc)
+            self.ranked = {}
+
+    # -- публічне ------------------------------------------------------------
+
+    def for_ad(self, watch_name: str, ad: Any) -> dict[str, Any] | None:
+        """Найдешевше живе оголошення на ту саму книжку. Не валить прогін."""
+        if not self.ranked:
+            return None
+        try:
+            rows = self.ranked.get(self._key(watch_name, ad)) or []
+        except Exception as exc:  # noqa: BLE001
+            log.debug("Мінімум для %s не склався: %s", getattr(ad, "id", "?"), exc)
+            return None
+        for row in rows[:self.depth]:
+            # Саме себе перевіряти не треба: це оголошення ми щойно бачили у
+            # видачі, і format_cheapest однаково напише «дешевше немає».
+            if str(row.get("id")) == str(getattr(ad, "id", "")) or self._alive(row):
+                return row
         return None
-    try:
-        w = next((x for x in cfg["watches"] if (x.get("name") or "") == watch_name), {})
-        key = analytics.book_key(
+
+    # -- всередині -----------------------------------------------------------
+
+    def _key(self, watch_name: str, ad: Any) -> str:
+        w = next((x for x in self.cfg["watches"] if (x.get("name") or "") == watch_name), {})
+        return analytics.book_key(
             getattr(ad, "title", "") or "", watch_name,
-            catalog=cfg.get("books") or [],
+            catalog=self.cfg.get("books") or [],
             include=w.get("include_keywords") or [],
             bundle_keywords=w.get("bundle_keywords") or [])
-        return cheap_map.get(key)
-    except Exception as exc:  # noqa: BLE001
-        log.debug("Мінімум для %s не склався: %s", getattr(ad, "id", "?"), exc)
-        return None
+
+    def _alive(self, row: dict[str, Any]) -> bool:
+        ad_id = str(row.get("id"))
+        if ad_id in self.checked:
+            return self.checked[ad_id]
+        url = str(row.get("url") or "")
+        if not self.verify or self.left <= 0 or "olx.ua" not in url:
+            # Нічим перевірити. Тому, хто був у видачі, віримо; тому, хто з неї
+            # зник, — ні: саме на цій довірі й поїхало мертве посилання.
+            return not row.get("miss")
+        self.left -= 1
+        try:
+            verdict = olx.ad_state(self.session, url, timeout=self.timeout)
+        except Exception as exc:  # noqa: BLE001
+            log.debug("Не вдалось перевірити найдешевше %s: %s", url, exc)
+            verdict = "unknown"
+        alive = verdict != "gone"
+        self.checked[ad_id] = alive
+        if not alive:
+            log.info("  найдешевше %s уже знято — беру наступне", url)
+            self._bury(row)
+        return alive
+
+    def _bury(self, row: dict[str, Any]) -> None:
+        """Знятого прибираємо зі стану й записуємо в історію проданих."""
+        try:
+            ws = (self.state.get("watches") or {}).get(str(row.get("watch"))) or {}
+            rec = (ws.get("ads") or {}).pop(str(row.get("id")), None)
+            if rec is None:
+                return
+            now_dt = datetime.now(timezone.utc)
+            days = _age_days(rec, now_dt)
+            self.state.setdefault("sold", []).append({
+                "id": str(row.get("id")), "watch": str(row.get("watch")),
+                "title": rec.get("title"), "price": rec.get("price"),
+                "cur": rec.get("cur"), "url": rec.get("url"),
+                "days": None if days is None else round(days, 1),
+                "gone": now_dt.isoformat(),
+                **({"an": False} if rec.get("an") is False else {}),
+            })
+            self.buried += 1
+        except Exception as exc:  # noqa: BLE001
+            log.debug("Не вдалось прибрати зняте %s: %s", row.get("id"), exc)
 
 
 def daily_book_report(cfg: dict[str, Any], state: dict[str, Any],
@@ -533,15 +677,16 @@ def daily_book_report(cfg: dict[str, Any], state: dict[str, Any],
     if store is not None and not store.claim("book_report_date", today):
         log.info("Денний звіт уже застовпив інший прогін — мовчу")
         return []
-    text = analytics.build_report(cfg, state, esc=notify.esc)
+    parts = analytics.build_report(cfg, state, esc=notify.esc)
     # Позначаємо день як відзвітований у будь-якому разі: інакше порожній
     # звіт перевірявся б наново щопрогону до півночі.
     analytics.mark_reported(state, opt)
-    if not text:
+    if not parts:
         log.info("Денний звіт про ціни: висновків поки нема, мовчу")
         return []
-    log.info("Денний звіт про ціни складено (%s символів)", len(text))
-    return [text]
+    log.info("Денний звіт про ціни складено: %s повідомл., %s символів",
+             len(parts), sum(len(p) for p in parts))
+    return parts
 
 
 def heartbeat_due(opt: dict[str, Any], ws: dict[str, Any]) -> bool:
@@ -598,14 +743,15 @@ def run(cfg: dict[str, Any], state: dict[str, Any], *, dry_run: bool,
         log.warning("Не вдалось порахувати профілі цін: %s", exc)
         prof_map = {}
 
-    # Найдешевше живе оголошення на кожну книжку — теж чиста арифметика над
-    # станом. Підписує кожне сповіщення поточним мінімумом, щоб ціну було з
-    # чим порівняти, не відкриваючи OLX.
-    try:
-        cheap_map = analytics.cheapest_now(cfg, state)
-    except Exception as exc:  # noqa: BLE001
-        log.warning("Не вдалось порахувати найдешевші ціни: %s", exc)
-        cheap_map = {}
+    # Найдешевше оголошення на кожну книжку — арифметика над станом, але з
+    # однією перевіркою наживо перед самою відправкою: стан відстає на прогін,
+    # і посилання встигає померти. Див. CheapestNow.
+    cheapest = CheapestNow(
+        cfg, state, session,
+        verify=bool(defaults.get("cheapest_verify", True)) and not dry_run,
+        budget=int(defaults.get("cheapest_verify_max", 12)),
+        depth=int(defaults.get("cheapest_verify_depth", 3)),
+    )
 
     # Бюджет описів — НА ПРОГІН, а не на watch. Двадцять один watch по тридцять
     # описів кожен — це шістсот зайвих запитів у найгіршому випадку, тобто
@@ -762,7 +908,7 @@ def run(cfg: dict[str, Any], state: dict[str, Any], *, dry_run: bool,
 
             if prev is None:
                 if d.notify and not first_run and ad.id not in announced:
-                    cheap = _cheapest(cfg, cheap_map, name, ad)
+                    cheap = cheapest.for_ad(name, ad)
                     messages.append(notify.Message(notify.format_event(
                         "new", name, ad, verdict=_verdict(cfg, prof_map, name, ad),
                         mark=d.tag, cheapest=cheap),
@@ -781,7 +927,7 @@ def run(cfg: dict[str, Any], state: dict[str, Any], *, dry_run: bool,
                     and ad.price < old * (1 - threshold)
                 )
                 if cheaper and ad.id not in announced:
-                    cheap = _cheapest(cfg, cheap_map, name, ad)
+                    cheap = cheapest.for_ad(name, ad)
                     messages.append(notify.Message(notify.format_event(
                         "drop", name, ad, old_price=old,
                         verdict=_verdict(cfg, prof_map, name, ad), mark=d.tag,
@@ -879,6 +1025,10 @@ def run(cfg: dict[str, Any], state: dict[str, Any], *, dry_run: bool,
             messages.extend(daily_book_report(cfg, state, store=store))
         except Exception as exc:  # noqa: BLE001
             log.warning("Денний звіт про ціни не склався: %s", exc)
+
+    if cheapest.buried:
+        log.info("«Найдешевше зараз»: %s посилань виявились знятими — прибрав зі стану",
+                 cheapest.buried)
 
     if not reports:
         log.info("Звіти вимкнені (--no-reports): їх складає інший прогін")
@@ -1000,6 +1150,9 @@ def main() -> int:
                          "їх бере на себе інший прогін")
     ap.add_argument("--mark-ru", metavar="ID|URL", action="append", default=[],
                     help="позначити оголошення російським вручну (без Telegram)")
+    ap.add_argument("--exclude", metavar="ID|URL", action="append", default=[],
+                    help="викреслити оголошення назавжди (не відкривається, "
+                         "хибне спрацювання, дивне видання)")
     ap.add_argument("--explain", metavar="URL",
                     help="чому конкретне оголошення прийшло або не прийшло")
     ap.add_argument("--find-chat", action="store_true",
@@ -1027,24 +1180,28 @@ def main() -> int:
 
     cfg = load_config(args.config)
 
-    if args.mark_ru:
-        store = storage.open_store(args, cfg)
+    if args.mark_ru or args.exclude:
+        # ⚠ Тут стояло `open_store(args, cfg)`, а він приймає лише іменовані
+        # аргументи — тобто гілка падала з TypeError ще до того, як дійти до
+        # неправильного id. Перевірено на живій базі 2026-09-30.
+        store = storage.open_store(state_path=args.state, mode=args.storage,
+                                   uri=args.mongo_uri, db_name=args.mongo_db)
         state = store.load()
-        flagged = state.setdefault("manual_ru", {})
-        now = datetime.now(timezone.utc).isoformat()
-        for raw in args.mark_ru:
-            # З посилання беремо id так само, як його бачить OLX: -ID<код>.html
-            m = re.search(r"-ID([A-Za-z0-9]+)\.html", str(raw))
-            ad_id = m.group(1) if m else str(raw).strip()
-            flagged.setdefault(ad_id, now)
-            for ws in (state.get("watches") or {}).values():
-                rec = (ws.get("ads") or {}).get(ad_id)
-                if rec is not None:
-                    rec["an"] = False
-                ws.setdefault("dropped", {})[ad_id] = now
-            log.info("Позначено російським: %s", ad_id)
+        added = 0
+        for raw_list, why in ((args.mark_ru, "ru"), (args.exclude, "bad")):
+            for raw in raw_list:
+                # ⚠ У посиланні OLX показує id, закодований base62, а не той,
+                # яким ключується стан. Раніше тут стояв regex, що брав код
+                # як є, — і позначка за посиланням мовчки нікуди не потрапляла.
+                ad_id = olx.ad_id_from(raw)
+                if ad_id is None:
+                    log.error("Не розпізнав оголошення: %s", raw)
+                    continue
+                added += exclude_ads(state, [ad_id], why=why)
+                log.info("Викреслено (%s): %s ← %s", why, ad_id, raw)
         store.save(state)
-        log.info("Усього ручних позначок у базі: %s", len(flagged))
+        log.info("Додано нових: %s. Усього ручних позначок у базі: %s",
+                 added, len(state.get("manual_ru") or {}))
         return 0
 
     if args.explain:

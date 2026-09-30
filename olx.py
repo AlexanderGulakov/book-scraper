@@ -28,6 +28,42 @@ class OlxError(RuntimeError):
     pass
 
 
+# У посиланні OLX показує НЕ той id, що в даних: `-ID11lZx2.html` — це число
+# 936150588, записане в base62 з алфавітом 0-9a-zA-Z. Перевірено на живих
+# оголошеннях 2026-09-30.
+#
+# ⚠ Через це `--mark-ru <посилання>` мовчки не працював: він клав у базу ключ
+# «11lZx2», а стан ключується числовим id, тож позначка нікуди не потрапляла.
+# Кнопка в Telegram працювала, бо несе id з даних.
+_B62 = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+_URL_ID_RE = re.compile(r"-ID([0-9a-zA-Z]+)\.html")
+
+
+def ad_id_from(raw: str) -> str | None:
+    """Числовий id оголошення з посилання, коду з посилання або самого id.
+
+    Повертає None, якщо розпізнати не вдалось — краще сказати «не знаю», ніж
+    позначити в базі неіснуючий ключ і вважати справу зробленою.
+    """
+    s = str(raw or "").strip()
+    if not s:
+        return None
+    m = _URL_ID_RE.search(s)
+    if m:
+        s = m.group(1)
+    elif "/" in s or ".html" in s:
+        return None                      # це посилання, але не на оголошення
+    if s.isdigit():
+        return s                         # уже id з даних
+    n = 0
+    for ch in s:
+        i = _B62.find(ch)
+        if i < 0:
+            return None
+        n = n * 62 + i
+    return str(n)
+
+
 def build_session() -> Fetcher:
     return Fetcher()
 

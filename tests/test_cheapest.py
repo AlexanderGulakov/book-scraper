@@ -34,9 +34,11 @@ def _cfg(**kw):
     return cfg
 
 
-def _ad(title, price, url):
-    return {"title": title, "price": price, "cur": "UAH", "seen": NOW,
-            "first": NOW, "url": url}
+def _ad(title, price, url, **kw):
+    rec = {"title": title, "price": price, "cur": "UAH", "seen": NOW,
+           "first": NOW, "url": url}
+    rec.update(kw)
+    return rec
 
 
 def test_one_watch_is_not_one_book():
@@ -155,3 +157,126 @@ def test_precise_watches_keep_the_narrow_list():
     # Список комплектів не має містити жодної назви книжки — інакше окремий
     # пошук за комплектами почав би ловити ще й одиночні томи.
     assert not (set(bundles) & set(precise))
+
+
+# ─────────────────────────────────────────── посилання, яке вже не відкривається
+
+def test_an_ad_missing_from_the_feed_is_not_the_cheapest():
+    """Реальна хиба 2026-09-30: під новим оголошенням за 175 грн поїхало
+    «найдешевше: 150» на оголошення, знятe ще до відправки повідомлення.
+
+    Прапорець `miss` ставить сам прогін тому, чого не було у видачі, — тобто
+    сигнал був, його просто не питали. Тут перевіряємо, що тепер питають.
+    """
+    state = {"watches": {"Макс Кідрук": {"seeded": True, "ads": {
+        "1": _ad("Кідрук Не озирайся і мовчи", 150, "https://olx.ua/1", miss=NOW),
+        "2": _ad("Кідрук Не озирайся і мовчи", 175, "https://olx.ua/2"),
+    }}}}
+    best = analytics.cheapest_now(_cfg(), state)
+    assert best["Кідрук: Не озирайся і мовчи"]["price"] == 175
+    # І воно не просто зникло з переможців, а взагалі не в черзі:
+    ranked = analytics.cheapest_ranked(_cfg(), state)
+    assert [r["id"] for r in ranked["Кідрук: Не озирайся і мовчи"]] == ["2"]
+
+
+def test_ranked_keeps_the_runner_up_and_knows_its_watch():
+    """Один переможець не рятує: якщо він помер, потрібен наступний за ціною,
+    а щоб його прибрати зі стану — ще й ключ watch'а."""
+    state = {"watches": {"Макс Кідрук": {"seeded": True, "ads": {
+        "1": _ad("Кідрук Не озирайся і мовчи", 150, "https://olx.ua/1"),
+        "2": _ad("Кідрук Не озирайся і мовчи", 175, "https://olx.ua/2"),
+    }}}}
+    rows = analytics.cheapest_ranked(_cfg(), state)["Кідрук: Не озирайся і мовчи"]
+    assert [r["price"] for r in rows] == [150, 175]
+    assert rows[0]["watch"] == "Макс Кідрук"
+
+
+def test_a_dead_link_is_replaced_and_buried(monkeypatch):
+    """Перевірка наживо: 410 на найдешевшому не має давати порожній рядок —
+    має давати наступне за ціною. А сам мрець їде в історію проданих, бо це
+    той самий висновок, що й у звіті про зняті, тільки раніше."""
+    import main, olx
+    from models import Ad
+
+    state = {"watches": {"Макс Кідрук": {"seeded": True, "ads": {
+        "1": _ad("Кідрук Не озирайся і мовчи", 150, "https://olx.ua/1"),
+        "2": _ad("Кідрук Не озирайся і мовчи", 175, "https://olx.ua/2"),
+    }}}}
+    monkeypatch.setattr(olx, "ad_state",
+                        lambda s, url, **kw: "gone" if url.endswith("/1") else "alive")
+
+    cheap = main.CheapestNow(_cfg(), state, session=object())
+    ad = Ad(id="99", title="Кідрук Не озирайся і мовчи", url="https://olx.ua/99",
+            price=300, currency="UAH", price_text="300 грн.")
+    row = cheap.for_ad("Макс Кідрук", ad)
+
+    assert row["price"] == 175, "мертвого треба замінити, а не промовчати"
+    assert "1" not in state["watches"]["Макс Кідрук"]["ads"], "мерця прибрано зі стану"
+    assert [s["id"] for s in state["sold"]] == ["1"], "і записано в історію"
+    assert cheap.buried == 1
+
+
+def test_a_network_hiccup_does_not_hide_the_cheapest(monkeypatch):
+    """`unknown` — це «не вдалось спитати», а не «немає». Мовчати через
+    тайм-аут гірше, ніж показати рядок: ту саму помилку вже робив
+    fetch_description, поки не навчився розрізняти ці випадки."""
+    import main, olx
+    from models import Ad
+
+    state = {"watches": {"Макс Кідрук": {"seeded": True, "ads": {
+        "1": _ad("Кідрук Не озирайся і мовчи", 150, "https://olx.ua/1"),
+    }}}}
+    monkeypatch.setattr(olx, "ad_state", lambda s, url, **kw: "unknown")
+
+    cheap = main.CheapestNow(_cfg(), state, session=object())
+    ad = Ad(id="99", title="Кідрук Не озирайся і мовчи", url="", price=300,
+            currency="UAH", price_text="")
+    assert cheap.for_ad("Макс Кідрук", ad)["price"] == 150
+    assert cheap.buried == 0
+
+
+def test_verification_has_a_budget(monkeypatch):
+    """Стеля потрібна, бо інакше поганий день на OLX (усе знято) перетворює
+    кілька повідомлень на десятки запитів посеред прогону."""
+    import main, olx
+    from models import Ad
+
+    ads = {str(i): _ad("Кідрук Не озирайся і мовчи", 100 + i, f"https://olx.ua/{i}")
+           for i in range(6)}
+    state = {"watches": {"Макс Кідрук": {"seeded": True, "ads": ads}}}
+    calls = []
+
+    def dead(s, url, **kw):
+        calls.append(url)
+        return "gone"
+
+    monkeypatch.setattr(olx, "ad_state", dead)
+    cheap = main.CheapestNow(_cfg(), state, session=object(), budget=2, depth=5)
+    ad = Ad(id="99", title="Кідрук Не озирайся і мовчи", url="", price=300,
+            currency="UAH", price_text="")
+    cheap.for_ad("Макс Кідрук", ad)
+    assert len(calls) == 2, "після вичерпання бюджету кандидат вважається живим"
+
+
+def test_a_missing_ad_gets_a_second_chance_when_we_can_check_it(monkeypatch):
+    """`miss` ≠ «знято»: старе оголошення просто з'їжджає зі сторінок, які ми
+    читаємо. Якщо є чим перевірити — перевіряємо, і живе повертається в гру.
+    Інакше вийшло б навпаки: чесний мінімум ринку ховали б від очей."""
+    import main, olx
+    from models import Ad
+
+    state = {"watches": {"Макс Кідрук": {"seeded": True, "ads": {
+        "1": _ad("Кідрук Не озирайся і мовчи", 150, "https://olx.ua/1", miss=NOW),
+        "2": _ad("Кідрук Не озирайся і мовчи", 175, "https://olx.ua/2"),
+    }}}}
+    monkeypatch.setattr(olx, "ad_state", lambda s, url, **kw: "alive")
+
+    ad = Ad(id="99", title="Кідрук Не озирайся і мовчи", url="", price=300,
+            currency="UAH", price_text="")
+
+    live = main.CheapestNow(_cfg(), state, session=object())
+    assert live.for_ad("Макс Кідрук", ad)["price"] == 150, "живе — значить показуємо"
+
+    # А з вимкненою перевіркою — обережність: зниклий у чергу не потрапляє.
+    blind = main.CheapestNow(_cfg(), state, session=object(), verify=False)
+    assert blind.for_ad("Макс Кідрук", ad)["price"] == 175

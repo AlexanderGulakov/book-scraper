@@ -46,6 +46,13 @@ class Message(str):
 
 
 MARK_RU_PREFIX = "ru:"
+MARK_BAD_PREFIX = "bad:"
+
+# Причина позначки → (підпис у клавіатурі після кліку, відповідь на натискання).
+MARK_REASONS = {
+    "ru": ("✓ позначено російським", "Позначено як російське"),
+    "bad": ("✓ не враховується", "Більше не враховується"),
+}
 
 
 def mark_keyboard(ad_id: str | None, cheap_id: str | None = None) -> dict[str, Any] | None:
@@ -60,14 +67,24 @@ def mark_keyboard(ad_id: str | None, cheap_id: str | None = None) -> dict[str, A
     Друга кнопка з'являється лише коли рядок «найдешевше» є і вказує на ІНШЕ
     оголошення.
     """
-    row = []
-    if ad_id:
-        row.append({"text": "🚫 Це оголошення рос.",
-                    "callback_data": f"{MARK_RU_PREFIX}{ad_id}"[:64]})
-    if cheap_id and cheap_id != ad_id:
-        row.append({"text": "🚫 Найдешевше рос.",
-                    "callback_data": f"{MARK_RU_PREFIX}{cheap_id}"[:64]})
-    return {"inline_keyboard": [row]} if row else None
+    rows = []
+    for prefix, mine, theirs in (
+        (MARK_RU_PREFIX, "🚫 Це оголошення рос.", "🚫 Найдешевше рос."),
+        # Друга причина: «не відкривається / хибне спрацювання / дивне
+        # видання, що ламає статистику». Наслідок той самий — оголошення
+        # більше не враховується ніде, — але причина інша, і в базі вона
+        # зберігається окремо: інакше через місяць не розібрати, чому саме
+        # цей запис викинуто.
+        (MARK_BAD_PREFIX, "🗑 Не враховувати це", "🗑 Не враховувати найдешевше"),
+    ):
+        row = []
+        if ad_id:
+            row.append({"text": mine, "callback_data": f"{prefix}{ad_id}"[:64]})
+        if cheap_id and cheap_id != ad_id:
+            row.append({"text": theirs, "callback_data": f"{prefix}{cheap_id}"[:64]})
+        if row:
+            rows.append(row)
+    return {"inline_keyboard": rows} if rows else None
 
 
 def esc(s: Any) -> str:
@@ -347,11 +364,14 @@ def poll_marks(offset: int | None = None) -> tuple[list[dict[str, Any]], int | N
         last = int(upd.get("update_id", 0)) + 1
         cq = upd.get("callback_query") or {}
         payload = str(cq.get("data") or "")
-        if not payload.startswith(MARK_RU_PREFIX):
+        prefix = next((p for p in (MARK_RU_PREFIX, MARK_BAD_PREFIX)
+                       if payload.startswith(p)), None)
+        if prefix is None:
             continue
         msg = cq.get("message") or {}
         marks.append({
-            "ad_id": payload[len(MARK_RU_PREFIX):],
+            "ad_id": payload[len(prefix):],
+            "why": prefix.rstrip(":"),
             "callback_id": cq.get("id"),
             "chat_id": (msg.get("chat") or {}).get("id"),
             "message_id": msg.get("message_id"),
@@ -366,9 +386,13 @@ def poll_marks(offset: int | None = None) -> tuple[list[dict[str, Any]], int | N
 def _keyboard_after_click(mark: dict[str, Any]) -> dict[str, Any]:
     """Та сама клавіатура без натиснутої кнопки, плюс галочка.
 
-    Кнопок під сповіщенням дві, і натиснути можуть обидві: спершу «найдешевше
-    рос.», потім, наприклад, і саме оголошення. Якщо після першого натискання
-    підмінити всю клавіатуру підписом, друга кнопка зникне назавжди.
+    Кнопок під сповіщенням до чотирьох (дві причини × основне і найдешевше), і
+    натиснути можуть кілька. Якщо після першого натискання підмінити всю
+    клавіатуру підписом, решта кнопок зникне назавжди.
+
+    Галочка бере підпис з причини, яку щойно натиснули: «позначено російським»
+    і «не враховується» — різні твердження, і плутати їх у підписі означало б
+    брехати про те, що саме зроблено.
     """
     clicked = str(mark.get("data") or "")
     rows = ((mark.get("markup") or {}).get("inline_keyboard") or [])
@@ -377,11 +401,12 @@ def _keyboard_after_click(mark: dict[str, Any]) -> dict[str, Any]:
     kept = [[b for b in row
              if b.get("callback_data") not in (clicked, "noop")] for row in rows]
     kept = [row for row in kept if row]
-    kept.append([{"text": "✓ позначено російським", "callback_data": "noop"}])
+    label = MARK_REASONS.get(str(mark.get("why") or "ru"), MARK_REASONS["ru"])[0]
+    kept.append([{"text": label, "callback_data": "noop"}])
     return {"inline_keyboard": kept}
 
 
-def confirm_mark(mark: dict[str, Any], text: str = "Позначено як російське") -> None:
+def confirm_mark(mark: dict[str, Any], text: str | None = None) -> None:
     """Прибирає «годинник» на кнопці й лишає решту кнопок на місці.
 
     Без `answerCallbackQuery` Telegram крутить спінер на кнопці до хвилини, і
@@ -391,6 +416,8 @@ def confirm_mark(mark: dict[str, Any], text: str = "Позначено як ро
     token = _clean(os.getenv("TELEGRAM_BOT_TOKEN"))
     if not token:
         return
+    if text is None:
+        text = MARK_REASONS.get(str(mark.get("why") or "ru"), MARK_REASONS["ru"])[1]
     try:
         requests.post(TG_API.format(token=token, method="answerCallbackQuery"),
                       data={"callback_query_id": mark.get("callback_id"), "text": text},

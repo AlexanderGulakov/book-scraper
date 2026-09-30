@@ -38,11 +38,12 @@ DEFAULTS: dict[str, Any] = {
     "analytics_window_days": 30,     # яку глибину історії проданих беремо
     "stalled_days": 14,              # з якого віку оголошення вважається «лежить»
     "stalled_seen_hours": 48,        # …і ще має бути у видачі, інакше воно просто зникло
-    "sold_max_age_days": 45,         # знято після цього — радше архів, ніж продаж
-    "min_sold": 4,                   # менше — «не вдалося визначити»
-    "min_stalled": 3,                # менше — межу «задорого» по довгожителях не рахуємо
+    "sold_max_age_days": 29,         # висіло довше — зникнення вже не доводить продажу
+    "min_sold": 1,                   # менше — «не вдалося визначити»
+    "min_stalled": 1,                # менше — межу «задорого» по довгожителях не рахуємо
     "analytics_min_price": 20,       # нижче — сміття («100 книг по 1 грн»)
-    "report_max_books": 28,          # скільки позицій влазить в одне повідомлення
+    "report_max_books": 60,          # стеля позицій у блоці
+    "report_max_messages": 4,        # на скільки повідомлень можна різати звіт
     "daily_report_hour": 9,          # за Києвом; None/false — вимкнути денний звіт
     "daily_report_tz": "Europe/Kyiv",
 }
@@ -239,7 +240,8 @@ def _usable(title: str, price: Any, cur: Any, w: dict[str, Any], opt: dict[str, 
 
 
 def collect(cfg: dict[str, Any], state: dict[str, Any], *,
-            now: datetime | None = None) -> dict[str, dict[str, list]]:
+            now: datetime | None = None,
+            stats: dict[str, Any] | None = None) -> dict[str, dict[str, list]]:
     """Дві вибірки на кожну книгу: `sold` і `stalled`.
 
     `sold` — з історії `state["sold"]`, яку наповнює `main.sold_report()`.
@@ -270,6 +272,7 @@ def collect(cfg: dict[str, Any], state: dict[str, Any], *,
                           bundle_keywords=w.get("bundle_keywords") or [])
 
     # ---- продані
+    too_old = [0]
     since = now - timedelta(days=float(opt["analytics_window_days"]))
     for rec in state.get("sold") or []:
         gone = _dt(rec.get("gone"))
@@ -277,7 +280,12 @@ def collect(cfg: dict[str, Any], state: dict[str, Any], *,
             continue
         days = rec.get("days")
         if days is not None and float(days) > float(opt["sold_max_age_days"]):
-            continue                      # радше OLX заархівував, ніж купили
+            # Висіло довше за поріг — зникнення вже нічого не доводить. Не
+            # видаляємо (журнал зникнень лишається повним), але й за продаж не
+            # рахуємо. Лічильник потрібен, щоб у звіті було видно, скільки саме
+            # відрізало: інакше тихе звуження вибірки виглядає як «ринок стих».
+            too_old[0] += 1
+            continue
         wname = str(rec.get("watch"))
         w = watches.get(wname)
         if w is None:
@@ -317,6 +325,9 @@ def collect(cfg: dict[str, Any], state: dict[str, Any], *,
                   {"price": float(rec["price"]), "days": age,
                    "title": title, "url": rec.get("url")})
 
+    if stats is not None:
+        stats["too_old"] = too_old[0]
+
     books: dict[str, dict[str, list]] = {}
     for (pool, _ad_id), (name, _cat, row) in picked.items():
         books.setdefault(name, {"sold": [], "stalled": []})[pool].append(row)
@@ -325,7 +336,14 @@ def collect(cfg: dict[str, Any], state: dict[str, Any], *,
 
 def cheapest_now(cfg: dict[str, Any], state: dict[str, Any], *,
                  now: datetime | None = None) -> dict[str, dict[str, Any]]:
-    """Найдешевше ЖИВЕ оголошення на кожну книжку: {ключ книги: {price,url,title,id}}.
+    """Найдешевше на кожну книжку — лише переможець. Див. `cheapest_ranked`."""
+    return {k: v[0] for k, v in cheapest_ranked(cfg, state, now=now).items() if v}
+
+
+def cheapest_ranked(cfg: dict[str, Any], state: dict[str, Any], *,
+                    now: datetime | None = None, limit: int = 5,
+                    include_missing: bool = False) -> dict[str, list[dict[str, Any]]]:
+    """Найдешевші ЖИВІ оголошення на кожну книжку: {ключ книги: [{price,url,…}, …]}.
 
     Навіщо. Саме по собі «нове оголошення за 300 грн» нічого не каже: може, це
     найдешевше на ринку, а може, поруч лежить таке саме за 180. Цей індекс
@@ -338,11 +356,19 @@ def cheapest_now(cfg: dict[str, Any], state: dict[str, Any], *,
     Що не бере:
     - оголошення, книжку яких не впізнав каталог `books:` — див. нижче;
     - оголошення з Букфлі: там інший (і менший) ринок;
+    - оголошення, позначені `miss`, тобто ті, яких не було в останній видачі —
+      див. нижче, це найважливіший фільтр тут. `include_missing=True` лишає їх
+      у списку з прапорцем `miss`: це для того, хто вміє перевірити посилання
+      наживо і сам вирішить. Без перевірки їм тут не місце;
     - оголошення, яких давно не бачили у видачі (`stalled_seen_hours`): мертве
       посилання гірше за відсутність рядка;
     - усе, що шар правил позначив `an: false` — комплекти й лоти. Порівнювати
       ціну однієї книжки з ціною набору безглуздо;
     - російськомовні й гуртові лоти — тим самим фільтром, що й статистика.
+
+    Повертає СПИСОК на книжку, а не переможця, і саме тому: посилання може
+    померти між прогоном і відправкою, і тоді потрібен наступний за ціною, а не
+    порожній рядок. Хто хоче перевірити його наживо — `main.CheapestNow`.
     """
     opt = _opts(cfg)
     watches = _watch_index(cfg)
@@ -350,7 +376,7 @@ def cheapest_now(cfg: dict[str, Any], state: dict[str, Any], *,
     now = now or datetime.now(timezone.utc)
     fresh_after = now - timedelta(hours=float(opt["stalled_seen_hours"]))
 
-    best: dict[str, dict[str, Any]] = {}
+    pool: dict[str, list[dict[str, Any]]] = {}
     for wname, ws in (state.get("watches") or {}).items():
         w = watches.get(wname)
         if w is None:
@@ -362,6 +388,19 @@ def cheapest_now(cfg: dict[str, Any], state: dict[str, Any], *,
             continue
         for ad_id, rec in (ws.get("ads") or {}).items():
             if rec.get("an") is False:
+                continue
+            # 🔑 `miss` ставить сам прогін тому оголошенню, якого цього разу не
+            # було у видачі. Це найраніший доступний сигнал «воно зникло», і
+            # раніше його тут не питали зовсім: рішення трималось лише на
+            # `seen`, тобто зникле оголошення лишалось «найдешевшим» ще до 48
+            # годин. Саме так 2026-09-30 під оголошенням за 175 грн поїхало
+            # посилання на давно зняте за 150.
+            #
+            # ⚠ Але `miss` ≠ «знято»: оголошення могло просто з'їхати з тих
+            # сторінок, які ми читаємо, — свіжі виштовхують старі. Тому воно не
+            # викидається наосліп, а лише тоді, коли перевірити нема чим.
+            missing = bool(rec.get("miss"))
+            if missing and not include_missing:
                 continue
             seen = _dt(rec.get("seen"))
             if seen is None or seen < fresh_after:
@@ -379,12 +418,16 @@ def cheapest_now(cfg: dict[str, Any], state: dict[str, Any], *,
             # показати посилання на іншу книжку.
             if not from_catalog:
                 continue
-            price = float(rec["price"])
-            cur = best.get(name)
-            if cur is None or price < cur["price"]:
-                best[name] = {"price": price, "url": rec.get("url"),
-                              "title": title, "id": str(ad_id)}
-    return best
+            pool.setdefault(name, []).append({
+                "price": float(rec["price"]), "url": rec.get("url"),
+                "title": title, "id": str(ad_id),
+                # Ключ watch'а в стані — щоб той, хто перевірить посилання й
+                # побачить 410, міг прибрати запис, а не лише промовчати.
+                "watch": wname, "miss": missing,
+            })
+
+    return {name: sorted(rows, key=lambda r: r["price"])[:max(1, limit)]
+            for name, rows in pool.items()}
 
 
 # ------------------------------------------------------------------- профілі
@@ -450,6 +493,11 @@ def profile(pool: dict[str, list], opt: dict[str, Any]) -> dict[str, Any]:
         "high": max(sold) if sold else None,
         "stalled_low": min(stalled) if stalled else None,
         "stalled_high": max(stalled) if stalled else None,
+        # Найдешевше з тих, що ЛЕЖАТЬ, разом із посиланням. Саме його видно в
+        # магазині просто зараз, тож це єдина ціна зі звіту, за якою можна піти
+        # й купити. Медіани описують минуле, а це — теперішнє.
+        "cheapest_stalled": min(pool["stalled"], key=lambda r: r["price"],
+                                default=None) if pool["stalled"] else None,
         "dead_from": dead_from,
         "dead_basis": dead_basis,       # "sold" — вище за реальні продажі;
                                         # "stalled" — продажів не бачили взагалі
@@ -537,17 +585,63 @@ def _days(v: float | None) -> str:
     return f"{round(v * 24)} год" if v < 1 else f"{v:.0f} дн."
 
 
-def build_report(cfg: dict[str, Any], state: dict[str, Any], *,
-                 now: datetime | None = None, esc=str) -> str:
-    """Денний звіт одним повідомленням для Telegram (HTML).
+def _link(price: float | None, url: str | None, esc=str) -> str:
+    """Ціна посиланням, якщо посилання є."""
+    label = _money(price)
+    return f"<a href=\"{esc(url)}\">{esc(label)}</a>" if url else esc(label)
 
-    Влазить у 4096 символів: позиції відсортовані за кількістю проданих,
-    зайве згортається в хвіст «мало даних». Telegram мовчки ріже довші
-    повідомлення, тож довжину контролюємо тут, а не сподіваємось.
+
+def split_messages(head: list[str], blocks: list[str], foot: list[str], *,
+                   limit: int = 3900, max_parts: int = 4) -> list[str]:
+    """Пакує блоки в кілька повідомлень, бо Telegram ріже на 4096 символів.
+
+    Раніше зайве просто викидалось (`body.pop()` у циклі), і звіт приїжджав
+    обрізаним на півслові — половина книжок не доходила взагалі. Різати текст
+    наосліп теж не можна: HTML-тег, розірваний навпіл, ламає все повідомлення,
+    тому межа проходить лише між цілими блоками.
+
+    Блок, довший за ліміт сам по собі, їде окремим повідомленням як є: це вже
+    не питання пакування, і мовчки його загубити було б гірше.
+    """
+    parts: list[list[str]] = [[]]
+    size = len("\n".join(head)) + len("\n".join(foot))
+    for block in blocks:
+        cost = len(block) + 1
+        if parts[-1] and size + cost > limit:
+            if len(parts) >= max_parts:
+                parts[-1].append(f"\n…і ще {len(blocks) - sum(len(p) for p in parts)} "
+                                 f"позицій не влізло.")
+                break
+            parts.append([])
+            size = len("\n".join(head)) + len("\n".join(foot))
+        parts[-1].append(block)
+        size += cost
+
+    parts = [p for p in parts if p]
+    if not parts:
+        return []
+    out = []
+    for i, chunk in enumerate(parts, 1):
+        mark = f" ({i}/{len(parts)})" if len(parts) > 1 else ""
+        first = [head[0] + mark] + head[1:] if head else []
+        # Підпис і хвіст — лише в останньому: повторювати легенду в кожному
+        # шматку означає з'їдати місце тим самим текстом.
+        tail = foot if i == len(parts) else []
+        out.append("\n".join(first + chunk + tail))
+    return out
+
+
+def build_report(cfg: dict[str, Any], state: dict[str, Any], *,
+                 now: datetime | None = None, esc=str) -> list[str]:
+    """Денний звіт для Telegram (HTML) — список повідомлень.
+
+    Список, а не рядок: звіт переріс 4096 символів, і стара поведінка
+    «викинути хвіст» мовчки з'їдала половину книжок.
     """
     now = now or datetime.now(timezone.utc)
     opt = _opts(cfg)
-    pools = collect(cfg, state, now=now)
+    stats: dict[str, Any] = {}
+    pools = collect(cfg, state, now=now, stats=stats)
     rows = [(name, profile(pool, opt)) for name, pool in pools.items()]
 
     # Два блоки, бо це два різні за силою твердження, і мішати їх в один
@@ -568,32 +662,62 @@ def build_report(cfg: dict[str, Any], state: dict[str, Any], *,
         f"За {int(opt['analytics_window_days'])} дн. зникло <b>{total_sold}</b> оголошень · "
         f"висять понад {int(opt['stalled_days'])} дн. <b>{total_stalled}</b>",
     ]
+    # Скільки зникнень не пішло в рахунок продажів. Без цього рядка звуження
+    # вибірки виглядає як «ринок стих», а насправді це наш власний поріг.
+    if stats.get("too_old"):
+        head.append(f"<i>ще {stats['too_old']} зникло після "
+                    f"{int(opt['sold_max_age_days'])} дн. — за продаж не рахую</i>")
     # Нема висновків — нема повідомлення. Щоденне «статистика ще набирається»
     # нічого не додає до того, що вже каже пульс, а привчає гортати звіт не
     # читаючи — і справжній звіт потім поїде туди ж.
     if not priced and not stuck:
-        return ""
+        return []
 
     body: list[str] = []
     if priced:
         body.append("\n<b>━━ Розходяться ━━</b>")
     for name, p in priced[:int(opt["report_max_books"])]:
-        bits = [f"🟢 до {_money(p['deal_max'])}", f"🙂 до {_money(p['ok_max'])}"]
+        # ⚠ З `min_sold: 1` один продаж дає deal_max == ok_max, і наївне
+        # форматування друкує «🟢 до 250 · 🙂 до 250» — два різні значки на
+        # одне й те саме число. Це виглядає як поламаний звіт і, гірше, вдає
+        # точність, якої в одному спостереженні нема. Тому одна ціна — один
+        # рядок, і сказано прямо, що її саме взяли.
+        same = p["deal_max"] == p["ok_max"]
+        bits = ([f"🟢 взяли за {_money(p['deal_max'])}"] if same else
+                [f"🟢 до {_money(p['deal_max'])}", f"🙂 до {_money(p['ok_max'])}"])
         if p["dead_from"] is not None:
             bits.append(f"🔴 від {_money(p['dead_from'])}")
+
+        # Медіани кажуть «скільки приблизно», але не кажуть розкиду: «зникали
+        # за 19 год» однаково описує і ринок 150–180, і ринок 150–900, а це
+        # два різні рішення. Тому діапазон реальних продажів — окремим рядком.
         tail = [f"{p['n_sold']} шт."]
+        if not same and p["low"] is not None and p["low"] != p["high"]:
+            tail.append(f"брали {_money(p['low'])}–{_money(p['high'])}")
         if p["median_days"] is not None:
-            tail.append(f"зникали за {_days(p['median_days'])}")
-        if p["n_stalled"]:
-            tail.append(f"{p['n_stalled']} лежать")
-        body.append(f"\n<b>{esc(name)}</b>\n{' · '.join(bits)}\n<i>{esc(' · '.join(tail))}</i>")
+            tail.append(f"{'зникло' if p['n_sold'] == 1 else 'зникали'} за "
+                        f"{_days(p['median_days'])}")
+        block = f"\n<b>{esc(name)}</b>\n{' · '.join(bits)}\n<i>{esc(' · '.join(tail))}</i>"
+
+        # Єдина ціна у звіті, за якою можна піти й купити просто зараз.
+        cheap = p["cheapest_stalled"]
+        if cheap:
+            block += (f"\n🔻 {p['n_stalled']} "
+                      f"{_plural(p['n_stalled'], 'лежить', 'лежать', 'лежать')}, "
+                      f"найдешевше {_link(cheap['price'], cheap.get('url'), esc)}")
+        body.append(block)
 
     if stuck:
         body.append("\n\n<b>━━ Не рухається зовсім ━━</b>")
         body.append("<i>за час спостережень не зникло жодного; стоп-ціна — з якої точно ні</i>")
         for name, p in stuck[:int(opt["report_max_books"])]:
-            body.append(f"🔴 <b>{esc(name)}</b> — {p['n_stalled']} лежать, "
-                        f"стоп-ціна {_money(p['dead_from'])}")
+            line = (f"🔴 <b>{esc(name)}</b> — {p['n_stalled']} "
+                    f"{_plural(p['n_stalled'], 'лежить', 'лежать', 'лежать')}, "
+                    f"стоп-ціна {_money(p['dead_from'])}")
+            cheap = p["cheapest_stalled"]
+            if cheap:
+                line += f", найдешевше {_link(cheap['price'], cheap.get('url'), esc)}"
+            body.append(line)
 
     foot: list[str] = []
     extra = max(len(priced) - int(opt["report_max_books"]), 0) + \
@@ -607,11 +731,8 @@ def build_report(cfg: dict[str, Any], state: dict[str, Any], *,
                     + ("…" if len(names) > 400 else ""))
     foot.append("\n🟢 беріть · 🙂 нормально · 🔴 за ці гроші лежить")
 
-    text = "\n".join(head + body + foot)
-    while len(text) > 3900 and len(body) > 1:     # Telegram мовчки ріже на 4096
-        body.pop()
-        text = "\n".join(head + body + ["\n…решта позицій не влізла."] + foot[-1:])
-    return text
+    return split_messages(head, body, foot,
+                          max_parts=int(opt.get("report_max_messages", 4)))
 
 
 # ------------------------------------------------------------------ розклад

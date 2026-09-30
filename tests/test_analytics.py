@@ -139,9 +139,37 @@ def test_without_sales_the_basis_is_different():
 
 
 def test_thin_sample_stays_silent():
-    p = analytics.profile(pool(sold_prices=[100, 200], stalled_prices=[900]), OPT)
+    """Пороги `min_sold` / `min_stalled` тут задані явно, бо в конфізі вони
+    зараз 1 — а перевіряємо ми сам механізм відсікання, а не поточне число."""
+    strict = {**OPT, "min_sold": 4, "min_stalled": 3}
+    p = analytics.profile(pool(sold_prices=[100, 200], stalled_prices=[900]), strict)
     assert p["deal_max"] is None and p["dead_from"] is None
     assert p["confident"] is False
+
+
+def test_one_sale_is_enough_and_does_not_fake_a_range():
+    """`min_sold: 1` — одного реального покупця досить, щоб знати ціну. Але
+    тоді 25-й і 75-й перцентилі збігаються, і наївний звіт друкував би
+    «🟢 до 250 · 🙂 до 250» — два значки на одне число, тобто вдавану точність.
+    Профіль має віддавати рівно те, що є."""
+    p = analytics.profile(pool(sold_prices=[250]), {**OPT, "min_sold": 1})
+    assert p["has_sold"] is True
+    assert p["deal_max"] == p["ok_max"] == 250
+    assert p["n_sold"] == 1
+    assert p["low"] == p["high"] == 250
+
+
+def test_a_single_sale_prints_one_price_not_two():
+    """Звітний бік тієї ж історії: одна ціна — один рядок."""
+    cfg = cfg_with("Кідрук")
+    state = {"watches": {}, "sold": [
+        {"id": "s1", "watch": "Кідрук", "title": "Колонія, Макс Кідрук",
+         "price": 250.0, "cur": "UAH", "days": 2, "gone": ago(days=1)},
+    ]}
+    text = "\n".join(analytics.build_report(cfg, state, now=NOW))
+    assert "взяли за 250" in text
+    assert "🙂 до" not in text, "другого порогу на одному продажі бути не може"
+    assert "зникло за" in text, "один продаж — однина"
 
 
 # ----------------------------------------------------------------- вердикти
@@ -181,7 +209,7 @@ def test_same_ad_seen_by_two_watches_counts_once():
     """«Клер: Місто скла» і «Клер: за авторкою» бачать ті самі оголошення."""
     cfg = cfg_with("Кідрук", "Служниця")
     rec = {"price": 300.0, "cur": "UAH", "title": "Колонія, Макс Кідрук",
-           "seen": ago(hours=1), "created": ago(days=20)}
+           "seen": ago(hours=1), "created": ago(days=40)}
     state = {"sold": [], "watches": {
         "Кідрук": {"ads": {"a1": rec}},
         "Служниця": {"ads": {"a1": dict(rec)}},
@@ -196,7 +224,7 @@ def test_vanished_ad_is_not_a_longtimer():
     cfg = cfg_with("Кідрук")
     state = {"sold": [], "watches": {"Кідрук": {"ads": {"a1": {
         "price": 300.0, "cur": "UAH", "title": "Колонія",
-        "seen": ago(days=5), "created": ago(days=20),
+        "seen": ago(days=5), "created": ago(days=40),
     }}}}}
     assert analytics.collect(cfg, state, now=NOW) == {}
 
@@ -215,7 +243,7 @@ def test_overpriced_ad_is_out_of_the_sample():
     cfg = cfg_with("Кідрук")
     state = {"sold": [], "watches": {"Кідрук": {"ads": {"a1": {
         "price": 45000.0, "cur": "UAH", "title": "Колонія",
-        "seen": ago(hours=1), "created": ago(days=20),
+        "seen": ago(hours=1), "created": ago(days=40),
     }}}}}
     assert analytics.collect(cfg, state, now=NOW) == {}
 
@@ -244,21 +272,48 @@ def test_sales_outside_the_window_are_ignored():
 
 # -------------------------------------------------------------- звіт і розклад
 
-def test_report_fits_into_one_telegram_message():
+def test_report_is_split_instead_of_being_cut_off():
     cfg = cfg_with(*[f"Пошук {i}" for i in range(40)])
     state = {"watches": {}, "sold": [
         {"id": f"s{i}-{j}", "watch": f"Пошук {i}", "title": f"Книжка {i}" * 5,
          "price": 100.0 + j * 50, "cur": "UAH", "days": 2, "gone": ago(days=1)}
         for i in range(40) for j in range(6)
     ]}
-    text = analytics.build_report(cfg, state, now=NOW)
-    assert len(text) <= 4096
+    parts = analytics.build_report(cfg, state, now=NOW)
+    assert parts, "звіт мав скластись"
+    assert all(len(p) <= 4096 for p in parts), "кожен шматок має влазити в Telegram"
+
+
+def test_a_long_report_goes_out_in_several_messages():
+    """Раніше зайве просто викидалось (`body.pop()` у циклі), і звіт приїжджав
+    обрізаним на півслові. Тепер воно їде наступним повідомленням."""
+    head = ["📊 Звіт", "підзаголовок"]
+    blocks = [f"\n<b>Книжка {i}</b>\n" + "х" * 200 for i in range(40)]
+    foot = ["\nлегенда"]
+    parts = analytics.split_messages(head, blocks, foot)
+
+    assert len(parts) > 1
+    assert all(len(p) <= 4096 for p in parts)
+    # Жоден блок не загубився і не розрізаний навпіл.
+    joined = "".join(parts)
+    assert all(f"<b>Книжка {i}</b>" in joined for i in range(40))
+    # Нумерація — щоб було видно, що це не все.
+    assert parts[0].startswith("📊 Звіт (1/")
+    # Легенда лише в останньому: повторювати її в кожному шматку — марна витрата.
+    assert sum("легенда" in p for p in parts) == 1
+
+
+def test_a_single_huge_block_is_not_silently_dropped():
+    """Блок, довший за ліміт, — це вже не питання пакування. Викинути його
+    мовчки гірше, ніж надіслати завеликим: Telegram хоч покаже, що є."""
+    parts = analytics.split_messages([], ["я" * 5000], [])
+    assert len(parts) == 1 and "я" * 5000 in parts[0]
 
 
 def test_report_stays_silent_when_there_is_nothing_to_say():
     """Щоденне «даних поки нема» — найшвидший спосіб привчити не читати звіт."""
-    text = analytics.build_report(cfg_with("Кідрук"), {"watches": {}, "sold": []}, now=NOW)
-    assert text == ""
+    parts = analytics.build_report(cfg_with("Кідрук"), {"watches": {}, "sold": []}, now=NOW)
+    assert parts == []
 
 
 NIGHT = {**analytics.DEFAULTS, "daily_report_at": "03:45"}
