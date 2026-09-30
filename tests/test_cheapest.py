@@ -113,3 +113,45 @@ def test_foreign_language_edition_is_dropped():
     keep = rules.decide(title="Гаррі Поттер і напівкровний принц українською",
                         price=300, watch={"max_price": 2000, "drop_foreign": True})
     assert keep.notify
+
+
+# ─────────────────────────────────────────── комплекти без назви книжки
+
+def test_a_bundle_names_no_book_and_must_still_pass():
+    """Реальний пропуск 2026-09-30: «Продам комплект книг Гаррі Поттер» за
+    1100 грн. Збиральний watch існує саме заради комплектів — і саме він їх
+    відкидав, бо include вимагав назву книжки, а комплект її не називає."""
+    import olx
+    from models import Ad
+
+    BOOKS = ["таємна кімната", "напівкровний", "прокляте дитя"]
+    BUNDLE = ["комплект", "усі частини", "7 книг"]
+    REQ = ["поттер", "потер", "potter", "ролін", "rowling"]
+
+    def ok(title, include):
+        ad = Ad(id="1", title=title, url="", price=1100, currency="UAH", price_text="")
+        return olx.matches(ad, include=include, require=REQ)
+
+    assert not ok("Продам комплект книг Гаррі Поттер", BOOKS), "так було до виправлення"
+    assert ok("Продам комплект книг Гаррі Поттер", BUNDLE + BOOKS)
+    assert ok("Усі частини Гаррі Поттер комплект", BUNDLE + BOOKS)
+    # Вимога згадати автора лишається: чужі комплекти не проходять.
+    assert not ok("Комплект книг Шерлок Холмс", BUNDLE + BOOKS)
+
+
+def test_precise_watches_keep_the_narrow_list():
+    """У восьми точкових пошуках назва книжки вже стоїть у запиті, тож
+    «комплект» там лише додав би шуму — список має лишитись вузьким."""
+    import yaml
+    from pathlib import Path
+    cfg = yaml.safe_load((Path(__file__).resolve().parent.parent / "watches.yaml")
+                         .read_text(encoding="utf-8"))
+    byname = {w["name"]: w for w in cfg["watches"]}
+    collective = byname["Гаррі Поттер"]["include_keywords"]
+    precise = byname["Поттер: Келих вогню"]["include_keywords"]
+    bundles = byname["Поттер: комплекти"]["include_keywords"]
+    assert any("комплект" in k for k in collective)
+    assert not any("комплект" in k for k in precise)
+    # Список комплектів не має містити жодної назви книжки — інакше окремий
+    # пошук за комплектами почав би ловити ще й одиночні томи.
+    assert not (set(bundles) & set(precise))
