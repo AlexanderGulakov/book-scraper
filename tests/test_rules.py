@@ -336,3 +336,64 @@ def test_keyword_rules_narrow_one_keyword_only():
     assert main.keyword_ok(ad("Зазирни у мої сни", "Макс Кідрук", "Кідрук"), rules_cfg)
     # OLX-оголошення (matched=None) проходить завжди
     assert main.keyword_ok(ad("Будь-що", None, None), rules_cfg)
+
+
+# ─────────────────────────────────────────────── «слати все, без порогів»
+
+def _witcher_cfg():
+    """Каталог і watch у тому вигляді, як вони стоять у watches.yaml."""
+    entry = {"name": "Відьмак: Вежа Ластівки",
+             "any": ["вежа ластівки", "вежа ласт", "tower of the swallow"],
+             "notify_always": True}
+    watch = {"name": "Відьмак: Вежа Ластівки", "max_price": 300,
+             "notify_max_price": 150,
+             "include_keywords": ["вежа ластівки", "вежа ласт"]}
+    return entry, watch
+
+
+def test_notify_always_ignores_the_telegram_threshold():
+    """Поріг 150 стоїть, оголошення за 224 — і воно все одно їде."""
+    entry, watch = _witcher_cfg()
+    d = rules.decide(title="Відьмак вежа ластівки", price=224.0, watch=watch,
+                     entry=entry, watch_name=watch["name"])
+    assert d.action == "notify"
+
+
+def test_notify_always_ignores_the_statistics_ceiling_too():
+    """«Без порогів» означає без усіх: дорожче за max_price теж приходить."""
+    entry, watch = _witcher_cfg()
+    d = rules.decide(title="Відьмак вежа ластівки", price=900.0, watch=watch,
+                     entry=entry, watch_name=watch["name"])
+    assert d.action == "notify"
+    assert d.analytics is False, "але в медіану таке не йде — як і без прапорця"
+
+
+def test_notify_always_still_sends_an_ad_without_a_price():
+    entry, watch = _witcher_cfg()
+    d = rules.decide(title="Відьмак вежа ластівки", price=None, watch=watch,
+                     entry=entry, watch_name=watch["name"])
+    assert d.action == "notify" and d.analytics is False
+
+
+def test_notify_always_does_not_override_the_language_filter():
+    """«Слати все» — це все ПОТРІБНЕ, а не все підряд: стоп-слова й мовні
+    фільтри стоять раніше й лишаються головними."""
+    entry, watch = _witcher_cfg()
+    w = {**watch, "drop_russian": True}
+    d = rules.decide(title="Відьмак вежа ластівки, книга на русском языке",
+                     price=100.0, watch=w, entry=entry, watch_name=watch["name"])
+    assert d.action == "skip"
+
+    w2 = {**watch, "drop_keywords": ["аудіокнига"]}
+    d2 = rules.decide(title="Відьмак вежа ластівки аудіокнига", price=100.0,
+                      watch=w2, entry=entry, watch_name=watch["name"])
+    assert d2.action == "skip"
+
+
+def test_without_the_flag_the_threshold_still_rules():
+    """Прапорець нікого більше не зачіпає."""
+    entry, watch = _witcher_cfg()
+    plain = {k: v for k, v in entry.items() if k != "notify_always"}
+    d = rules.decide(title="Відьмак вежа ластівки", price=224.0, watch=watch,
+                     entry=plain, watch_name=watch["name"])
+    assert d.action == "store"
