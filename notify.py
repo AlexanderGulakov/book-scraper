@@ -32,16 +32,23 @@ class Message(str):
     `mark_id` — id САМОГО оголошення, `cheap_id` — id того, що показане в
     рядку «найдешевше зараз». Немає id — немає відповідної кнопки: під пульсом
     і звітами їм нічого позначати.
+
+    `cheap_near` — чи те друге оголошення не дешевше, а просто найближче за
+    ціною. На дію кнопки це не впливає (позначається все одно воно), але
+    впливає на підпис: сказати «найдешевше» там, де показано «найближче»,
+    означало б збрехати про те, що саме зараз викреслять.
     """
 
     mark_id: str | None
     cheap_id: str | None
+    cheap_near: bool
 
     def __new__(cls, text: str, mark_id: str | None = None,
-                cheap_id: str | None = None) -> "Message":
+                cheap_id: str | None = None, cheap_near: bool = False) -> "Message":
         obj = super().__new__(cls, text)
         obj.mark_id = mark_id
         obj.cheap_id = cheap_id
+        obj.cheap_near = bool(cheap_near)
         return obj
 
 
@@ -55,7 +62,8 @@ MARK_REASONS = {
 }
 
 
-def mark_keyboard(ad_id: str | None, cheap_id: str | None = None) -> dict[str, Any] | None:
+def mark_keyboard(ad_id: str | None, cheap_id: str | None = None, *,
+                  near: bool = False) -> dict[str, Any] | None:
     """Кнопки під сповіщенням. `callback_data` ≤ 64 байти — id влазить.
 
     Дві кнопки, бо російським може виявитись будь-яке з двох оголошень, і це
@@ -64,18 +72,23 @@ def mark_keyboard(ad_id: str | None, cheap_id: str | None = None) -> dict[str, A
     російським було «найдешевше зараз», а кнопка позначила б українське
     видання, про яке прийшло сповіщення.
 
-    Друга кнопка з'являється лише коли рядок «найдешевше» є і вказує на ІНШЕ
-    оголошення.
+    Друга кнопка з'являється лише коли рядок про сусіднє оголошення є і вказує
+    на ІНШЕ оголошення.
+
+    `near=True` — коли дешевшого немає і показане «найближче за ціною». Кнопка
+    та сама й позначає те саме оголошення, змінюється лише підпис: він має
+    називати те, що людина бачить у повідомленні.
     """
     rows = []
+    other = "Найближче" if near else "Найдешевше"
     for prefix, mine, theirs in (
-        (MARK_RU_PREFIX, "🚫 Це оголошення рос.", "🚫 Найдешевше рос."),
+        (MARK_RU_PREFIX, "🚫 Це оголошення рос.", f"🚫 {other} рос."),
         # Друга причина: «не відкривається / хибне спрацювання / дивне
         # видання, що ламає статистику». Наслідок той самий — оголошення
         # більше не враховується ніде, — але причина інша, і в базі вона
         # зберігається окремо: інакше через місяць не розібрати, чому саме
         # цей запис викинуто.
-        (MARK_BAD_PREFIX, "🗑 Не враховувати це", "🗑 Не враховувати найдешевше"),
+        (MARK_BAD_PREFIX, "🗑 Не враховувати це", f"🗑 Не враховувати {other.lower()}"),
     ):
         row = []
         if ad_id:
@@ -237,25 +250,47 @@ def format_event(kind: str, watch_name: str, ad, old_price: float | None = None,
     return "\n".join(bits)
 
 
+def cheap_is_near(cheapest: dict | None, ad) -> bool:
+    """Сусід не дешевший за наше оголошення, а просто найближчий за ціною.
+
+    Одне місце на всіх, бо відповідь потрібна двічі й мусить збігтися: тут
+    вирішується і текст рядка, і підпис кнопки, яка позначає те саме
+    оголошення.
+    """
+    if not cheapest or cheapest.get("price") is None:
+        return False
+    if str(cheapest.get("id") or "") == str(getattr(ad, "id", "")):
+        return False
+    mine = getattr(ad, "price", None)
+    return mine is not None and float(cheapest["price"]) >= float(mine)
+
+
 def format_cheapest(cheapest: dict | None, ad) -> str:
-    """Рядок «найдешевше зараз» під оголошенням.
+    """Рядок про сусіднє оголошення на ту саму книжку.
 
     Сенс у порівнянні: «300 грн» саме по собі не каже нічого, а «300 грн, а
-    поруч лежить за 180» — каже все. Якщо дешевше немає, так і пишемо: це теж
-    відповідь, і саме та, заради якої варто відкривати посилання.
+    поруч лежить за 180» — каже все.
+
+    Коли дешевшого немає, це теж відповідь — і саме та, заради якої варто
+    відкривати посилання. Але самого «дешевше немає» замало: без другого числа
+    не видно, це перевага в десять гривень чи вдвічі. Тому поруч їде найближче
+    за ціною — наступне оголошення на ту саму книжку, яким і міряється, чого
+    варта знахідка. Воно ж стоїть під правими кнопками: сусіда теж буває
+    потрібно викреслити (російське видання, хибне спрацювання), і доти воно
+    псуватиме порівняння в кожному наступному сповіщенні.
     """
     if not cheapest or cheapest.get("price") is None:
         return ""
     price = float(cheapest["price"])
-    mine = ad.price
-    if str(cheapest.get("id") or "") == str(getattr(ad, "id", "")) or \
-            (mine is not None and price >= mine):
-        return "🔻 <i>Дешевше на зараз немає</i>"
     label = esc(_fmt(price, ad.currency))
     url = cheapest.get("url")
-    if url:
-        return f"🔻 Найдешевше зараз: <a href=\"{esc(url)}\">{label}</a>"
-    return f"🔻 Найдешевше зараз: {label}"
+    link = f"<a href=\"{esc(url)}\">{label}</a>" if url else label
+
+    if str(cheapest.get("id") or "") == str(getattr(ad, "id", "")):
+        return "🔻 <i>Дешевше на зараз немає</i>"
+    if cheap_is_near(cheapest, ad):
+        return f"🔻 <i>Дешевше на зараз немає</i>\n🔸 Найближче: {link}"
+    return f"🔻 Найдешевше зараз: {link}"
 
 
 def format_heartbeat(watch_name: str, *, keywords: int, seen: int, kept: int,
@@ -501,7 +536,7 @@ def dispatch(channels: list[Any], messages: list[str]) -> int:
                 # `keyboard` передаємо лише коли кнопка справді є: інакше
                 # будь-який інший канал із сигнатурою send(text, *, photo)
                 # зламався б на незнайомому аргументі.
-                kb = mark_keyboard(msg.mark_id, msg.cheap_id)
+                kb = mark_keyboard(msg.mark_id, msg.cheap_id, near=msg.cheap_near)
                 extra = {"keyboard": kb} if kb else {}
                 if not ch.send(str(msg), **extra):
                     failed += 1

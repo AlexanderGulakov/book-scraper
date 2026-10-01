@@ -15,6 +15,7 @@ import time
 from typing import Any, Iterable
 from urllib.parse import urlparse, parse_qsl, urlencode, urlunparse
 
+import bundles
 from fetcher import Fetcher, describe_block
 from models import Ad
 
@@ -203,23 +204,17 @@ def matches(ad: Ad, *, include: Iterable[str] = (), exclude: Iterable[str] = (),
 
 
 def is_bundle(ad: Ad, *, include: Iterable[str] = (), bundle_keywords: Iterable[str] = (),
-              min_repeats: int = 2) -> bool:
-    """Схоже, що в оголошенні не одна книжка, а кілька.
-
-    Дві ознаки, обидві по заголовку:
-    1. пряма вказівка — «комплект», «набір», «всі частини»;
-    2. ключове слово повторюється: «Служниця спостерігає, Весілля служниці,
-       Секрет служниці» — три згадки «служниц», отже три книжки. Одна книжка
-       згадує себе один раз.
+              min_repeats: int = 2, watch_name: str = "",
+              catalog: Iterable[dict[str, Any]] = ()) -> bool:
+    """Схоже, що в оголошенні не одна книжка, а кілька. Логіка — у `bundles`.
 
     Потрібно, бо за комплект люди готові платити більше, ніж за окрему книжку,
     і одна межа `max_price` на такий watch не працює.
     """
-    title = (ad.title or "").casefold()
-    if any(w.casefold() in title for w in bundle_keywords if w):
-        return True
-    hits = sum(title.count(w.casefold()) for w in include if w)
-    return hits >= min_repeats
+    return bundles.looks_like_bundle(ad.title or "", watch_name, catalog=catalog,
+                                     include=include,
+                                     bundle_keywords=bundle_keywords,
+                                     min_repeats=min_repeats)
 
 
 def price_ok(ad: Ad, *, max_price: float | None, min_price: float | None,

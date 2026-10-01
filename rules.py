@@ -25,6 +25,8 @@ import re
 from dataclasses import dataclass
 from typing import Any, Iterable
 
+import bundles
+
 # Літери, яких в українській абетці немає. Найдешевша ознака російськомовного
 # оголошення, але НЕ достатня: «Гарри Поттер и узник Азкабана» не містить
 # жодної з них. Тому нижче є ще два рівні.
@@ -217,31 +219,27 @@ def needs_description(watch: dict[str, Any]) -> bool:
     return bool(watch.get("needs_description"))
 
 
-def is_bundle_text(text: str, *, include: Iterable[str] = (),
+def is_bundle_text(text: str, watch_name: str = "", *,
+                   catalog: Iterable[dict[str, Any]] = (),
+                   include: Iterable[str] = (),
                    bundle_keywords: Iterable[str] = (),
                    min_repeats: int = 2) -> bool:
-    """Чи схоже, що в оголошенні кілька книжок.
+    """Чи схоже, що в оголошенні кілька книжок. Уся логіка — у `bundles`.
 
-    Та сама логіка, що в `olx.is_bundle`, але по будь-якому тексту, а не лише
-    по заголовку: у Кідрука комплект часто видно тільки з опису («продам усі
-    п'ять книг однією посилкою»), а назва каже просто «Макс Кідрук».
+    Тут текст — це заголовок РАЗОМ з описом, а не лише заголовок: у Кідрука
+    комплект часто видно тільки з опису («продам усі п'ять книг однією
+    посилкою»), а назва каже просто «Макс Кідрук».
     """
-    t = (text or "").casefold()
-    words = list(bundle_keywords) or [
-        "комплект", "набір", "набор", "збірник", "зібрання", "усі частини",
-        "всі частини", "цикл", "серія книг", "семитомник", "трилогія", "томи",
-        "одним лотом", "дві книги", "три книги", "чотири книги", "п'ять книг",
-        "5 книг", "4 книги", "3 книги", "2 книги",
-    ]
-    if any(w.casefold() in t for w in words if w):
-        return True
-    hits = sum(t.count(w.casefold()) for w in include if w)
-    return hits >= min_repeats
+    return bundles.looks_like_bundle(text, watch_name, catalog=catalog,
+                                     include=include,
+                                     bundle_keywords=bundle_keywords,
+                                     min_repeats=min_repeats)
 
 
 def decide(*, title: str, price: float | None, watch: dict[str, Any],
            entry: dict[str, Any] | None = None, description: str | None = None,
-           include: Iterable[str] = ()) -> Decision:
+           include: Iterable[str] = (), watch_name: str = "",
+           catalog: Iterable[dict[str, Any]] = ()) -> Decision:
     """Головна функція модуля. `watch` — опції watch'а (вже злиті з defaults)."""
 
     hay = f"{title or ''}\n{description or ''}"
@@ -297,7 +295,8 @@ def decide(*, title: str, price: float | None, watch: dict[str, Any],
             return Decision("skip", reason="англомовний заголовок")
 
     # 4. Комплект. Дивимось і заголовок, і опис.
-    bundle = is_bundle_text(hay, include=include,
+    bundle = is_bundle_text(hay, watch_name or str(watch.get("name") or ""),
+                            catalog=catalog, include=include,
                             bundle_keywords=watch.get("bundle_keywords") or ())
     bundle_analytics = bool(_opt(entry, watch, "bundle_analytics", default=True))
     analytics = bundle_analytics if bundle else True

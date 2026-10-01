@@ -29,6 +29,8 @@ import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable
 
+import bundles
+
 log = logging.getLogger("analytics")
 
 # --------------------------------------------------------------- налаштування
@@ -110,36 +112,20 @@ def is_lot(title: str, markers: Iterable[str] = ()) -> bool:
     return bool(m and int(m.group(1)) >= LOT_MIN_COUNT)
 
 
-def title_is_bundle(title: str, *, include: Iterable[str] = (),
+def title_is_bundle(title: str, watch_name: str = "", *,
+                    catalog: Iterable[dict[str, Any]] = (),
+                    include: Iterable[str] = (),
                     bundle_keywords: Iterable[str] = (), min_repeats: int = 2) -> bool:
-    """Комплект однієї серії (а не гуртовий лот). Та сама логіка, що в olx.is_bundle."""
-    t = (title or "").casefold()
-    words = list(bundle_keywords) or ["комплект", "набір", "набор", "збірник", "зібрання",
-                                      "усі частини", "всі частини", "цикл", "серія книг",
-                                      "семитомник", "трилогія", "томи"]
-    if any(w.casefold() in t for w in words if w):
-        return True
-    hits = sum(t.count(w.casefold()) for w in include if w)
-    return hits >= min_repeats
+    """Комплект однієї серії (а не гуртовий лот). Уся логіка — у `bundles`."""
+    return bundles.looks_like_bundle(title, watch_name, catalog=catalog,
+                                     include=include,
+                                     bundle_keywords=bundle_keywords,
+                                     min_repeats=min_repeats)
 
 
 # ------------------------------------------------------- ключ книги (каталог)
 
-def _entry_matches(entry: dict[str, Any], title: str, watch_name: str) -> bool:
-    watches = entry.get("watch")
-    if watches and watch_name not in list(watches):
-        return False
-    t = title.casefold()
-    all_of = [w.casefold() for w in (entry.get("all") or []) if w]
-    if all_of and not all(w in t for w in all_of):
-        return False
-    any_of = [w.casefold() for w in (entry.get("any") or []) if w]
-    if any_of and not any(w in t for w in any_of):
-        return False
-    none_of = [w.casefold() for w in (entry.get("not") or []) if w]
-    if any(w in t for w in none_of):
-        return False
-    return bool(all_of or any_of)
+_entry_matches = bundles.entry_matches
 
 
 def book_match(title: str, watch_name: str, *, catalog: Iterable[dict[str, Any]] = (),
@@ -157,10 +143,9 @@ def book_match(title: str, watch_name: str, *, catalog: Iterable[dict[str, Any]]
     трапляється в кількох пошуках одразу, і з двох назв ми лишаємо
     конкретнішу («Клер: Місто скла», а не «Клер: за авторкою»).
     """
-    bundle = title_is_bundle(title, include=include, bundle_keywords=bundle_keywords)
-    for entry in catalog or ():
-        if not _entry_matches(entry, title or "", watch_name):
-            continue
+    bundle = title_is_bundle(title, watch_name, catalog=catalog, include=include,
+                             bundle_keywords=bundle_keywords)
+    for entry in bundles.matching_entries(title or "", watch_name, catalog):
         name = str(entry.get("name") or watch_name)
         if entry.get("bundle"):
             return name, True                # позиція каталогу вже про комплект
@@ -180,10 +165,8 @@ def book_entry(title: str, watch_name: str,
     («Бот — до 500», «Прокляте дитя — до 180»), і без доступу до неї шар
     правил довелося б дублювати логікою зіставлення.
     """
-    for entry in catalog or ():
-        if _entry_matches(entry, title or "", watch_name):
-            return entry
-    return None
+    hits = bundles.matching_entries(title or "", watch_name, catalog)
+    return hits[0] if hits else None
 
 
 # ------------------------------------------------------------ збір вибірок
@@ -222,7 +205,8 @@ def _price_cap(w: dict[str, Any], opt: dict[str, Any], bundle: bool) -> float | 
     return None if cap is None else float(cap)
 
 
-def _usable(title: str, price: Any, cur: Any, w: dict[str, Any], opt: dict[str, Any]) -> bool:
+def _usable(title: str, price: Any, cur: Any, w: dict[str, Any], opt: dict[str, Any],
+            *, watch_name: str = "", catalog: Iterable[dict[str, Any]] = ()) -> bool:
     if price is None or not isinstance(price, (int, float)):
         return False
     if (cur or "UAH").upper() != str(opt.get("currency", "UAH")).upper():
@@ -233,7 +217,9 @@ def _usable(title: str, price: Any, cur: Any, w: dict[str, Any], opt: dict[str, 
         return False
     if is_lot(title, opt.get("lot_markers") or LOT_MARKERS):
         return False
-    bundle = title_is_bundle(title, include=w.get("include_keywords") or [],
+    bundle = title_is_bundle(title, watch_name or str(w.get("name") or ""),
+                             catalog=catalog,
+                             include=w.get("include_keywords") or [],
                              bundle_keywords=w.get("bundle_keywords") or [])
     cap = _price_cap(w, opt, bundle)
     return cap is None or float(price) <= cap
@@ -295,7 +281,8 @@ def collect(cfg: dict[str, Any], state: dict[str, Any], *,
         # без ціни. Вони варті повідомлення, але не медіани.
         if rec.get("an") is False:
             continue
-        if not _usable(title, rec.get("price"), rec.get("cur"), w, opt):
+        if not _usable(title, rec.get("price"), rec.get("cur"), w, opt,
+                       watch_name=wname, catalog=catalog):
             continue
         name, from_catalog = classify(title, wname, w)
         offer("sold", str(rec.get("id") or rec.get("url") or title), name, from_catalog,
@@ -318,7 +305,8 @@ def collect(cfg: dict[str, Any], state: dict[str, Any], *,
             title = str(rec.get("title") or "")
             if rec.get("an") is False:
                 continue
-            if not _usable(title, rec.get("price"), rec.get("cur"), w, opt):
+            if not _usable(title, rec.get("price"), rec.get("cur"), w, opt,
+                           watch_name=wname, catalog=catalog):
                 continue
             name, from_catalog = classify(title, wname, w)
             offer("stalled", str(ad_id), name, from_catalog,
@@ -406,7 +394,8 @@ def cheapest_ranked(cfg: dict[str, Any], state: dict[str, Any], *,
             if seen is None or seen < fresh_after:
                 continue
             title = str(rec.get("title") or "")
-            if not _usable(title, rec.get("price"), rec.get("cur"), w, opt):
+            if not _usable(title, rec.get("price"), rec.get("cur"), w, opt,
+                           watch_name=wname, catalog=catalog):
                 continue
             name, from_catalog = book_match(title, wname, catalog=catalog,
                                             include=w.get("include_keywords") or [],

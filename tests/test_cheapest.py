@@ -280,3 +280,112 @@ def test_a_missing_ad_gets_a_second_chance_when_we_can_check_it(monkeypatch):
     # А з вимкненою перевіркою — обережність: зниклий у чергу не потрапляє.
     blind = main.CheapestNow(_cfg(), state, session=object(), verify=False)
     assert blind.for_ad("Макс Кідрук", ad)["price"] == 175
+
+
+# ───────────────────────────────── «дешевшого немає» → найближче за ціною
+
+def test_the_ad_itself_is_skipped_so_the_neighbour_can_be_shown(monkeypatch):
+    """Саме себе повертати нема сенсу: з цього виходило «дешевше немає» і все.
+
+    Тепер замість себе береться наступне за ціною — воно й стане «найближчим».
+    """
+    import main, olx
+    from models import Ad
+
+    state = {"watches": {"Макс Кідрук": {"seeded": True, "ads": {
+        "99": _ad("Кідрук Не озирайся і мовчи", 150, "https://olx.ua/99"),
+        "2": _ad("Кідрук Не озирайся і мовчи", 175, "https://olx.ua/2"),
+    }}}}
+    monkeypatch.setattr(olx, "ad_state", lambda s, url, **kw: "alive")
+
+    cheap = main.CheapestNow(_cfg(), state, session=object())
+    ad = Ad(id="99", title="Кідрук Не озирайся і мовчи", url="https://olx.ua/99",
+            price=150, currency="UAH", price_text="150 грн.")
+    assert cheap.for_ad("Макс Кідрук", ad)["price"] == 175
+
+
+def test_the_only_ad_on_the_market_has_no_neighbour(monkeypatch):
+    """Порівнювати нема з чим — і другого рядка нема. Вигадувати не будемо."""
+    import main, olx
+    from models import Ad
+
+    state = {"watches": {"Макс Кідрук": {"seeded": True, "ads": {
+        "99": _ad("Кідрук Не озирайся і мовчи", 150, "https://olx.ua/99"),
+    }}}}
+    monkeypatch.setattr(olx, "ad_state", lambda s, url, **kw: "alive")
+
+    cheap = main.CheapestNow(_cfg(), state, session=object())
+    ad = Ad(id="99", title="Кідрук Не озирайся і мовчи", url="https://olx.ua/99",
+            price=150, currency="UAH", price_text="150 грн.")
+    assert cheap.for_ad("Макс Кідрук", ad) is None
+
+
+def _ad_obj(price):
+    from models import Ad
+    return Ad(id="99", title="Кідрук Не озирайся і мовчи", url="https://olx.ua/99",
+              price=price, currency="UAH", price_text=f"{price:.0f} грн.")
+
+
+def test_no_cheaper_shows_the_nearest_price():
+    """Самого «дешевше немає» замало: без другого числа не видно, це перевага
+    в десять гривень чи вдвічі."""
+    import notify
+
+    line = notify.format_cheapest(
+        {"price": 175, "url": "https://olx.ua/2", "id": "2"}, _ad_obj(150))
+    assert "Дешевше на зараз немає" in line
+    assert "Найближче" in line and "175" in line and "olx.ua/2" in line
+
+
+def test_a_cheaper_neighbour_still_wins_the_line():
+    import notify
+
+    line = notify.format_cheapest(
+        {"price": 120, "url": "https://olx.ua/2", "id": "2"}, _ad_obj(150))
+    assert line.startswith("🔻 Найдешевше зараз:")
+    assert "Найближче" not in line
+
+
+def test_the_same_price_counts_as_nearest_not_cheapest():
+    import notify
+
+    line = notify.format_cheapest(
+        {"price": 150, "url": "https://olx.ua/2", "id": "2"}, _ad_obj(150))
+    assert "Дешевше на зараз немає" in line and "Найближче" in line
+
+
+def test_buttons_name_what_the_message_shows():
+    """Кнопка позначає те саме оголошення, але підпис мусить збігатись із
+    рядком: «найдешевше» там, де показано «найближче», — це брехня про те, що
+    зараз викреслять."""
+    import notify
+
+    near = notify.mark_keyboard("99", "2", near=True)
+    texts = [b["text"] for row in near["inline_keyboard"] for b in row]
+    assert "🚫 Найближче рос." in texts
+    assert "🗑 Не враховувати найближче" in texts
+    assert all(b["callback_data"].endswith("2")
+               for row in near["inline_keyboard"] for b in row
+               if "Найближче" in b["text"] or "найближче" in b["text"])
+
+    cheap = notify.mark_keyboard("99", "2")
+    texts = [b["text"] for row in cheap["inline_keyboard"] for b in row]
+    assert "🚫 Найдешевше рос." in texts
+    assert "🗑 Не враховувати найдешевше" in texts
+
+
+def test_the_message_carries_the_label_choice_to_the_keyboard():
+    """`cheap_is_near` рахується один раз і їде з повідомленням — інакше текст
+    і кнопки розійшлися б."""
+    import notify
+
+    ad = _ad_obj(150)
+    row = {"price": 175, "url": "https://olx.ua/2", "id": "2"}
+    assert notify.cheap_is_near(row, ad) is True
+    assert notify.cheap_is_near({"price": 120, "id": "2"}, ad) is False
+    assert notify.cheap_is_near(None, ad) is False
+
+    msg = notify.Message("текст", mark_id="99", cheap_id="2",
+                         cheap_near=notify.cheap_is_near(row, ad))
+    assert msg.cheap_near is True
+    assert notify.Message("текст").cheap_near is False

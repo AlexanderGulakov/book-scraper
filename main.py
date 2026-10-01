@@ -677,7 +677,17 @@ class CheapestNow:
     # -- публічне ------------------------------------------------------------
 
     def for_ad(self, watch_name: str, ad: Any) -> dict[str, Any] | None:
-        """Найдешевше живе оголошення на ту саму книжку. Не валить прогін."""
+        """Найдешевше живе оголошення на ту саму книжку, крім самого себе.
+
+        Себе пропускаємо, і це не дрібниця. Раніше оголошення, яке саме було
+        найдешевшим, поверталось сюди само, і рядок казав «дешевше немає» —
+        порожня відповідь на найцікавіший випадок. Тепер замість себе береться
+        наступне за ціною: під ним поїде «🔸 Найближче», яким і міряється,
+        чого варта знахідка, і саме його позначать праві кнопки.
+
+        Ціна рішення — одна перевірка посилання там, де раніше не було жодної.
+        Бюджет прогону (`cheapest_verify_max`) від цього не змінюється.
+        """
         if not self.ranked:
             return None
         try:
@@ -685,10 +695,15 @@ class CheapestNow:
         except Exception as exc:  # noqa: BLE001
             log.debug("Мінімум для %s не склався: %s", getattr(ad, "id", "?"), exc)
             return None
-        for row in rows[:self.depth]:
-            # Саме себе перевіряти не треба: це оголошення ми щойно бачили у
-            # видачі, і format_cheapest однаково напише «дешевше немає».
-            if str(row.get("id")) == str(getattr(ad, "id", "")) or self._alive(row):
+        mine = str(getattr(ad, "id", ""))
+        tried = 0
+        for row in rows:
+            if str(row.get("id")) == mine:
+                continue        # пропуск себе перевірки не коштує
+            if tried >= self.depth:
+                break
+            tried += 1
+            if self._alive(row):
                 return row
         return None
 
@@ -982,7 +997,8 @@ def run(cfg: dict[str, Any], state: dict[str, Any], *, dry_run: bool,
 
             d = rules.decide(title=ad.title, price=ad.price, watch=opt,
                              entry=entry, description=desc,
-                             include=opt.get("include_keywords", []) or [])
+                             include=opt.get("include_keywords", []) or [],
+                             watch_name=name, catalog=catalog)
 
             if d.action == "skip":
                 # Якщо оголошення колись було в базі, а тепер правила його
@@ -1000,7 +1016,8 @@ def run(cfg: dict[str, Any], state: dict[str, Any], *, dry_run: bool,
                     messages.append(notify.Message(notify.format_event(
                         "new", name, ad, verdict=_verdict(cfg, prof_map, name, ad),
                         mark=d.tag, cheapest=cheap),
-                        mark_id=ad.id, cheap_id=(cheap or {}).get("id")))
+                        mark_id=ad.id, cheap_id=(cheap or {}).get("id"),
+                        cheap_near=notify.cheap_is_near(cheap, ad)))
                     remember_told(state, ad, now)
                     new_cnt += 1
                 elif not d.notify:
@@ -1022,7 +1039,8 @@ def run(cfg: dict[str, Any], state: dict[str, Any], *, dry_run: bool,
                         "drop", name, ad, old_price=old,
                         verdict=_verdict(cfg, prof_map, name, ad), mark=d.tag,
                         cheapest=cheap),
-                        mark_id=ad.id, cheap_id=(cheap or {}).get("id")))
+                        mark_id=ad.id, cheap_id=(cheap or {}).get("id"),
+                        cheap_near=notify.cheap_is_near(cheap, ad)))
                     remember_told(state, ad, now)
                     drop_cnt += 1
 
@@ -1200,7 +1218,8 @@ def explain_ad(cfg: dict[str, Any], url: str) -> int:
         hit = True
         entry = analytics.book_entry(ad.title, name, catalog)
         d = rules.decide(title=ad.title, price=ad.price, watch=opt, entry=entry,
-                         description=desc, include=opt.get("include_keywords", []) or [])
+                         description=desc, include=opt.get("include_keywords", []) or [],
+                         watch_name=name, catalog=catalog)
         icon = {"notify": "📨 Telegram", "store": "💾 лише база", "skip": "✕ відкинуто"}[d.action]
         log.info("%-34s %-13s %s", name, icon, d.reason)
         log.info("%-34s книжка: %s%s", "", entry["name"] if entry else "(за назвою watch\'а)",
