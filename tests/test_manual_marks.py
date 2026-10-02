@@ -330,3 +330,25 @@ def test_memory_of_messages_expires_like_the_ads_themselves():
     }}
     assert main.prune_told(state, 30) == 1
     assert list(state["told"]) == ["new"]
+
+
+def test_the_olx_alphabet_swaps_v_and_w():
+    """🔑 Код у посиланні — НЕ звичайний base62: в алфавіті OLX `v` і `w`
+    переставлені місцями, і в нижньому регістрі, і у верхньому.
+
+    Схоже на описку в їхній константі (…stu**wv**xyz, …STU**WV**XYZ), але
+    стабільну: перевірено 2026-10-02 на 2889 парах (id ↔ код) з живої видачі —
+    звичайний base62 дав 734 помилки, переставлені лише великі — 278,
+    обидва — жодної.
+
+    Чому це взагалі помітили: `--exclude <посилання>` на коді з `v` або `w`
+    клав у базу ключ неіснуючого оголошення. Без помилки, без ефекту — рівно
+    та тиша, яку неможливо помітити, поки не звіриш із живими даними.
+    """
+    import olx
+    # Усі п'ять — живі пари, зняті з API OLX 2026-10-02.
+    assert olx.ad_id_from("-IDV5hGi.html") == "858287098"    # велика V
+    assert olx.ad_id_from("-ID11nWTh.html") == "936613247"   # велика W
+    assert olx.ad_id_from("-IDvdI1a.html") == "476110224"    # мала v
+    assert olx.ad_id_from("-IDCwjiN.html") == "568963137"    # мала w
+    assert olx.ad_id_from("-ID11lZx2.html") == "936150588"   # без v/w — не зачеплено

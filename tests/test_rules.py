@@ -397,3 +397,40 @@ def test_without_the_flag_the_threshold_still_rules():
     d = rules.decide(title="Відьмак вежа ластівки", price=224.0, watch=watch,
                      entry=plain, watch_name=watch["name"])
     assert d.action == "store"
+
+
+# ─────────────────────────────────────────── комплект Ріггза (2026-10-02)
+
+def test_riggs_bundle_has_its_own_ceiling():
+    """Повний цикл із дев'яти книжок коштує інакше, ніж одна, і спільний
+    `max_price: 2000` робив комплекти мовчазними. Реальний випадок: комплект
+    за 2675 тихо осів у базі, і користувач про нього не дізнався."""
+    watch = {"name": "Ренсом Ріггз (автор)", "max_price": 2000,
+             "notify_max_price_bundle": 1600,
+             "include_keywords": ["ріггз", "дім дивних дітей"]}
+
+    cheap = rules.decide(title="Ріггз Дім дивних дітей комплект 3 книги",
+                         price=1400.0, watch=dict(watch), watch_name=watch["name"])
+    assert cheap.action == "notify"
+
+    dear = rules.decide(title="Ренсон Ріггз Дім дивних дітей", price=2675.0,
+                        watch=dict(watch), watch_name=watch["name"],
+                        description='Комплект книг "Дім дивних дітей"')
+    assert dear.action == "store", "дорожче за межу комплекту — мовчки в базу"
+
+    # Одиночка межі комплекту не бачить: у неї власний поріг watch'а.
+    single = rules.decide(title="Ріггз Дім дивних дітей", price=1800.0,
+                          watch=dict(watch), watch_name=watch["name"])
+    assert single.action == "notify", "одна книжка живе за порогом 2000"
+
+
+def test_the_bundle_ceiling_is_read_from_the_description_too():
+    """У заголовку слова «комплект» може не бути — як і не було в тому
+    оголошенні за 2675. Детектор дивиться й опис."""
+    watch = {"name": "Ренсом Ріггз (автор)", "max_price": 2000,
+             "notify_max_price_bundle": 1600,
+             "include_keywords": ["ріггз", "дім дивних дітей"]}
+    d = rules.decide(title="Ренсон Ріггз Дім дивних дітей", price=1700.0,
+                     watch=dict(watch), watch_name=watch["name"],
+                     description="Комплект книг. Ціна вказана за комплект.")
+    assert d.action == "store", "1700 > 1600 — межа комплекту спрацювала з опису"

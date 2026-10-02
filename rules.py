@@ -294,6 +294,23 @@ def decide(*, title: str, price: float | None, watch: dict[str, Any],
         if is_english_text(title, min_letters=25, share=0.8, markers=markers):
             return Decision("skip", reason="англомовний заголовок")
 
+    # 3в. «Слати все» — для книжок, яких просто мало на ринку. Ціна тоді не
+    #     критерій узагалі: пропустити рідкісне оголошення дорожче, ніж
+    #     отримати зайве повідомлення.
+    #
+    #     ⚠ Стоїть ПІСЛЯ мовних фільтрів і стоп-слів, а не перед ними: «слати
+    #     все» означає все потрібне, а не все підряд. Російське видання
+    #     «Вежі Ластівки» лишається непотрібним, скільки б воно не коштувало.
+    #
+    #     У статистику таке оголошення не йде: межа `max_price` для того й
+    #     існує, щоб медіану не зсувала випадкова ціна. Прапорець знімає
+    #     мовчання, а не здоровий глузд.
+    if _opt(entry, watch, "notify_always", default=False):
+        store_max = _opt(entry, watch, "max_price", book_key="store_max")
+        countable = (price is not None and store_max is not None
+                     and price <= float(store_max))
+        return Decision("notify", analytics=countable, reason="книжка рідкісна — шлемо все")
+
     # 4. Комплект. Дивимось і заголовок, і опис.
     bundle = is_bundle_text(hay, watch_name or str(watch.get("name") or ""),
                             catalog=catalog, include=include,
@@ -337,6 +354,15 @@ def decide(*, title: str, price: float | None, watch: dict[str, Any],
     # цілком, і виглядало б це як зламаний скрапер, а не як зміна конфігу.
     if notify_max is None and notify_high is None:
         notify_max = store_max
+
+    # Жодної межі не задано взагалі — це «без обмежень», а не «нічого не слати».
+    # Без цього рядка watch без `max_price` мовчить ПОВНІСТЮ: нижче перевірки
+    # написані як `is not None and ...`, тож ціна не проходить жодну з них і
+    # падає у фінальний `store`. Читається конфіг рівно навпаки, і помітити це
+    # можна лише за тишею — тобто ніяк.
+    if notify_max is None and notify_high is None and store_max is None:
+        return Decision("notify", analytics=price is not None,
+                        reason="меж ціни не задано")
 
     if price is None:
         # Обмін / «договірна». Статистиці така ціна нічого не дає, але
