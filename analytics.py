@@ -46,7 +46,8 @@ DEFAULTS: dict[str, Any] = {
     "analytics_min_price": 20,       # нижче — сміття («100 книг по 1 грн»)
     "report_max_books": 60,          # стеля позицій у блоці
     "report_max_messages": 4,        # на скільки повідомлень можна різати звіт
-    "daily_report_hour": 9,          # за Києвом; None/false — вимкнути денний звіт
+    "daily_report_at": None,         # "ГГ:ХХ" за Києвом; головніше за daily_report_hour
+    "daily_report_hour": 9,          # лише година; None/false — вимкнути денний звіт
     "daily_report_tz": "Europe/Kyiv",
 }
 
@@ -726,15 +727,47 @@ def build_report(cfg: dict[str, Any], state: dict[str, Any], *,
 
 # ------------------------------------------------------------------ розклад
 
-def report_due(state: dict[str, Any], opt: dict[str, Any], *,
-               now: datetime | None = None) -> bool:
-    """Чи час слати денний звіт: настала потрібна година і сьогодні ще не слали."""
+def report_time(opt: dict[str, Any]) -> tuple[int, int] | None:
+    """(година, хвилина) за місцевим часом, або None якщо звіт вимкнено.
+
+    Два налаштування, і старе лишається робочим навмисно: конфіг переживає
+    код, і мовчки зламати вже налаштований розклад гірше, ніж потримати дві
+    гілки на п'ять рядків.
+
+        daily_report_at: "03:45"   — рядок ГГ:ХХ, головніший
+        daily_report_hour: 9       — лише година, якщо `_at` не задано
+
+    `False` або None у будь-якому з них вимикає звіт.
+
+    Хвилини знадобились саме через нічний час: без них 03:45 тихо з'їжджало
+    на 03:00, тобто на пів години раніше, ніж написано в конфізі.
+    """
+    at = opt.get("daily_report_at", DEFAULTS.get("daily_report_at"))
+    if at is False:
+        return None
+    if at:
+        try:
+            hh, _, mm = str(at).partition(":")
+            return int(hh), int(mm or 0)
+        except ValueError:
+            log.warning("daily_report_at=%r не схоже на ГГ:ХХ — беру daily_report_hour", at)
     hour = opt.get("daily_report_hour", DEFAULTS["daily_report_hour"])
     if hour is None or hour is False:
+        return None
+    return int(hour), 0
+
+
+def report_due(state: dict[str, Any], opt: dict[str, Any], *,
+               now: datetime | None = None) -> bool:
+    """Чи час слати денний звіт: настав потрібний час і сьогодні ще не слали."""
+    when = report_time(opt)
+    if when is None:
         return False
     now = now or datetime.now(timezone.utc)
     local = _to_local(now, str(opt.get("daily_report_tz", DEFAULTS["daily_report_tz"])))
-    if local.hour < int(hour):
+    # Порівняння «не раніше», а не «точно о»: розклад GitHub Actions пливе, і
+    # вимога влучити в хвилину означала б, що звіт інколи не йде зовсім.
+    if (local.hour, local.minute) < when:
         return False
     return state.get("book_report_date") != local.date().isoformat()
 

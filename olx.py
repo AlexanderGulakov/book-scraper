@@ -13,7 +13,7 @@ import random
 import re
 import time
 from typing import Any, Iterable
-from urllib.parse import urlparse, parse_qsl, urlencode, urlunparse
+from urllib.parse import urlparse, parse_qsl, urlencode, urlunparse, unquote
 
 import bundles
 from fetcher import Fetcher, describe_block
@@ -324,3 +324,150 @@ def ad_state(session: Fetcher, url: str, *, timeout: int = 20) -> str:
     if status_field is None and not ad.get("title"):
         return "unknown"
     return "alive" if status_field in (None, "active") else "gone"
+
+
+# ─────────────────────────────────────────────── JSON-пошук замість HTML
+
+SEARCH_API = "https://www.olx.ua/api/v1/offers/"
+
+# Шлях категорії в URL watch'а → її id для API. Словник, а не константа, бо
+# невідому категорію ми мусимо вміти РОЗПІЗНАТИ і відкотитись на HTML:
+# без `category_id` той самий запит «кідрук» віддає 203 оголошення замість 194,
+# і серед зайвих — техніка, іграшки й усе, що просто містить це слово.
+CATEGORY_IDS = {"hobbi-otdyh-i-sport/knigi-zhurnaly": 49}
+
+API_PAGE = 50          # стеля OLX на один виклик; більше він однаково не дає
+
+
+def api_params(url: str, *, page: int = 1, limit: int = API_PAGE) -> dict[str, Any] | None:
+    """Параметри JSON-пошуку з URL watch'а, або None якщо URL не розкладається.
+
+    None — це не помилка, а сигнал «цей watch лишаємо на HTML». Саме так і
+    треба: мовчазна підміна запиту іншим страшніша за зайві дві секунди.
+    """
+    parts = urlparse(url)
+    segs = [s for s in parts.path.split("/") if s]
+    query = next((s[2:] for s in segs if s.startswith("q-")), None)
+    if not query:
+        return None
+    cat_path = "/".join(s for s in segs if not s.startswith("q-") and s != "uk")
+    cat_id = CATEGORY_IDS.get(cat_path)
+    if cat_id is None:
+        return None
+    q = dict(parse_qsl(parts.query, keep_blank_values=True))
+    return {
+        "query": unquote(query).replace("-", " "),
+        "category_id": cat_id,
+        "currency": q.get("currency", "UAH"),
+        # У HTML це search[order]=created_at:desc, в API — sort_by. Назви різні,
+        # значення те саме.
+        "sort_by": q.get("search[order]", "created_at:desc"),
+        "limit": limit,
+        "offset": (max(1, page) - 1) * limit,
+    }
+
+
+def _api_url(params: dict[str, Any]) -> str:
+    return f"{SEARCH_API}?{urlencode(params)}"
+
+
+def _api_price(raw: dict[str, Any]) -> dict[str, Any]:
+    for p in raw.get("params") or []:
+        if p.get("key") == "price":
+            return p.get("value") or {}
+    return {}
+
+
+def _api_param(raw: dict[str, Any], key: str) -> str | None:
+    for p in raw.get("params") or []:
+        if p.get("key") == key:
+            v = p.get("value") or {}
+            return v.get("label") or v.get("key")
+    return None
+
+
+def _normalize_api(raw: dict[str, Any], *, promoted: bool, organic: bool,
+                   desc_limit: int = 1200) -> Ad:
+    price = _api_price(raw)
+    value = price.get("value")
+    photos = raw.get("photos") or []
+    photo = (photos[0] or {}).get("link") if photos else None
+    if photo:
+        # OLX віддає шаблон із {width}x{height}; без підстановки це не посилання.
+        photo = photo.replace("{width}", "1000").replace("{height}", "700")
+    desc = raw.get("description")
+    if isinstance(desc, str):
+        desc = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", desc)).strip()[:desc_limit]
+    else:
+        desc = None
+    return Ad(
+        id=str(raw.get("id")),
+        title=(raw.get("title") or "").strip(),
+        url=raw.get("url") or "",
+        price=float(value) if isinstance(value, (int, float)) else None,
+        currency=price.get("currency"),
+        price_text=price.get("label") or "—",
+        negotiable=bool(price.get("negotiable")),
+        promoted=promoted,
+        condition=_api_param(raw, "state"),
+        city=((raw.get("location") or {}).get("city") or {}).get("name"),
+        created_time=raw.get("created_time"),
+        photo=photo,
+        # У HTML «схоже на ваш запит» лежить в окремому expansionListing, якого
+        # ми не читаємо. В API той самий поділ дає metadata.source: усе, що не
+        # organic і не promoted, — не точний збіг.
+        similar=not (promoted or organic),
+        reason="promoted" if promoted else ("organic" if organic else "similar"),
+        source="olx",
+        description=desc,
+    )
+
+
+def parse_ads_api(body: str) -> list[Ad]:
+    data = json.loads(body)
+    items = data.get("data") or []
+    src = ((data.get("metadata") or {}).get("source") or {})
+    promoted = set(src.get("promoted") or [])
+    organic = set(src.get("organic") or [])
+    # Якщо metadata.source немає — вважаємо всі точними збігами: краще зайве
+    # оголошення, ніж мовчазна втрата всієї видачі через зміну формату.
+    blind = not promoted and not organic
+    return [_normalize_api(raw, promoted=i in promoted,
+                           organic=blind or i in organic)
+            for i, raw in enumerate(items)]
+
+
+def fetch_watch_api(session: Fetcher, url: str, pages: int = 1, *,
+                    pause: float = 2.0, limit: int = API_PAGE) -> list[Ad]:
+    """Те саме, що `fetch_watch`, але через JSON-пошук.
+
+    Навіщо. Заміряно 2026-10-03 з раннера GitHub: HTML-сторінка пошуку — 1.85 с
+    і 3.1 МБ без описів; той самий запит через API — 0.4-0.8 с, 0.3-0.4 МБ і
+    описи ВСІХ оголошень. Тобто зникає і три чверті ваги, і цілий клас запитів
+    (`fetch_description`), і потреба в другій сторінці: `limit=50` перекриває
+    HTML-сторінку з запасом.
+
+    Звірено на запиті «кідрук»: HTML віддав 41 оголошення, API з тією самою
+    категорією — 51, і всі 41 серед них. Строга надмножина, не інша вибірка.
+    """
+    seen: dict[str, Ad] = {}
+    for page in range(1, max(1, pages) + 1):
+        params = api_params(url, page=page, limit=limit)
+        if params is None:
+            raise OlxError(f"URL watch'а не розкладається в параметри API: {url}")
+        status, body = session.get(_api_url(params), timeout=30,
+                                   referer=fetcher_home())
+        if status != 200:
+            raise OlxError(f"API відповів {status}")
+        try:
+            ads = parse_ads_api(body)
+        except ValueError as exc:
+            raise OlxError(f"API віддав не JSON: {exc}") from exc
+        log.info("  сторінка %s (api): %s оголошень", page, len(ads))
+        for ad in ads:
+            seen.setdefault(ad.id, ad)
+        if not ads:
+            break
+        if page < pages:
+            time.sleep(pause + random.uniform(0, 1.5))
+    return list(seen.values())

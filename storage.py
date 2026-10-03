@@ -49,6 +49,27 @@ DEFAULT_DB = "olx_watcher"
 
 # Поля watch'а, які лежать у колекції `watches`. `ads` виноситься в окрему
 # колекцію — саме заради цього все й затівалось.
+# ─── імена в базі ───────────────────────────────────────────────────────────
+#
+# Одне місце на весь файл. Раніше вони були розсипані літералами по
+# п'ятнадцяти викликах `self.db[COLL_ADS]`, і будь-яке перейменування означало
+# пошук-заміну по коду плюс надію нічого не пропустити.
+#
+# ⚠ Імена навмисно куці й збігаються з іменами полів у пам'яті. Була спроба
+# зробити їх читабельними (`watcherState`, `soldListings`, `lastSeenAt`) —
+# документація й тести під це написані, але сама реалізація не закомітилась,
+# і півтора місяця десять тестів падали «через оточення». 2026-10-03 вирішено
+# не доробляти: у живій базі вже лежать документи зі старими іменами, тож
+# ціна — разова міграція на бойових даних заради косметики. Якщо колись таки
+# робити — починати звідси.
+COLL_STATE = "meta"
+COLL_WATCHES = "watches"
+COLL_ADS = "ads"
+COLL_SOLD = "sold"
+COLL_PRICES = "price_observations"
+STATE_ID = "state"
+
+
 _WATCH_FIELDS_SKIP = {"ads"}
 
 
@@ -220,14 +241,14 @@ class MongoStore:
         if self._indexed:
             return
         try:
-            self.db.ads.create_index([("w", 1)])
-            self.db.ads.create_index([("seen", 1)])
-            self.db.ads.create_index([("miss", 1)])
-            self.db.sold.create_index([("gone", -1)])
-            self.db.sold.create_index([("watch", 1)])
-            self.db.price_observations.create_index([("a", 1), ("at", 1)])
-            self.db.price_observations.create_index([("at", -1)])
-            self.db.price_observations.create_index([("w", 1)])
+            self.db[COLL_ADS].create_index([("w", 1)])
+            self.db[COLL_ADS].create_index([("seen", 1)])
+            self.db[COLL_ADS].create_index([("miss", 1)])
+            self.db[COLL_SOLD].create_index([("gone", -1)])
+            self.db[COLL_SOLD].create_index([("watch", 1)])
+            self.db[COLL_PRICES].create_index([("a", 1), ("at", 1)])
+            self.db[COLL_PRICES].create_index([("at", -1)])
+            self.db[COLL_PRICES].create_index([("w", 1)])
         except Exception as exc:  # noqa: BLE001
             log.warning("Не вдалось створити індекси (працюємо далі): %s", exc)
         self._indexed = True
@@ -244,20 +265,20 @@ class MongoStore:
         """Збирає з колекцій рівно той dict, що раніше лежав у файлі."""
         state = empty_state()
 
-        meta = self.db.meta.find_one({"_id": "state"}) or {}
+        meta = self.db[COLL_STATE].find_one({"_id": STATE_ID}) or {}
         for field in META_FIELDS:
             if meta.get(field) is not None:
                 state[field] = meta[field]
         state.setdefault("version", STATE_VERSION)
 
         watches: dict[str, Any] = {}
-        for doc in self.db.watches.find({}):
+        for doc in self.db[COLL_WATCHES].find({}):
             key = str(doc.pop("_id"))
             doc.pop("ads", None)
             doc["ads"] = {}
             watches[key] = doc
 
-        for doc in self.db.ads.find({}):
+        for doc in self.db[COLL_ADS].find({}):
             ident = doc.get("_id") or {}
             key, ad = str(ident.get("w", "")), str(ident.get("a", ""))
             if not key or not ad:
@@ -269,7 +290,7 @@ class MongoStore:
 
         sold = [
             {k: v for k, v in doc.items() if k != "_id"}
-            for doc in self.db.sold.find({}).sort("gone", 1)
+            for doc in self.db[COLL_SOLD].find({}).sort("gone", 1)
         ]
         if sold:
             state["sold"] = sold
@@ -294,8 +315,8 @@ class MongoStore:
         операцією, тож другий прогін дістає None і мовчить.
         """
         try:
-            doc = self.db.meta.find_one_and_update(
-                {"_id": "state",
+            doc = self.db[COLL_STATE].find_one_and_update(
+                {"_id": STATE_ID,
                  "$or": [{field: {"$lt": not_before}}, {field: {"$exists": False}}]},
                 {"$set": {field: not_before}},
                 upsert=True,
@@ -319,8 +340,8 @@ class MongoStore:
 
         Щоб стерти й історію, є `migrate_state.py --force` або рука в Atlas.
         """
-        self.db.watches.delete_many({})
-        self.db.ads.delete_many({})
+        self.db[COLL_WATCHES].delete_many({})
+        self.db[COLL_ADS].delete_many({})
         state = self.load()          # підтягне sold і meta, які лишились
         state["watches"] = {}
         self._snapshot = copy.deepcopy(state)
@@ -372,8 +393,8 @@ class MongoStore:
             counts["ads_deleted"] += 1
         counts["ads"] = len(ad_ops) - counts["ads_deleted"]
         counts["prices"] = len(price_ops)
-        self._bulk(self.db.ads, ad_ops)
-        self._bulk(self.db.price_observations, price_ops)
+        self._bulk(self.db[COLL_ADS], ad_ops)
+        self._bulk(self.db[COLL_PRICES], price_ops)
 
         # 2. Службові поля watch'ів.
         cur_w = state.get("watches") or {}
@@ -389,12 +410,12 @@ class MongoStore:
         for key in orphans:
             w_ops.append(DeleteOne({"_id": key}))
             counts["watches_deleted"] += 1
-        self._bulk(self.db.watches, w_ops)
+        self._bulk(self.db[COLL_WATCHES], w_ops)
         if orphans:
             # Watch зник із конфігу (перейменували) — його оголошення теж
             # більше нікому не належать.
             try:
-                self.db.ads.delete_many({"w": {"$in": orphans}})
+                self.db[COLL_ADS].delete_many({"w": {"$in": orphans}})
             except Exception as exc:  # noqa: BLE001
                 log.warning("Не вдалось прибрати оголошення зниклих watch'ів: %s", exc)
 
@@ -412,19 +433,19 @@ class MongoStore:
         for ident in old_sold.keys() - cur_sold.keys():
             s_ops.append(DeleteOne({"_id": dict(zip(("w", "a", "g"), ident))}))
             counts["sold_deleted"] += 1
-        self._bulk(self.db.sold, s_ops)
+        self._bulk(self.db[COLL_SOLD], s_ops)
 
         # 4. meta — останньою: це «прогін дорахував до кінця».
-        meta = {"_id": "state", "version": state.get("version", STATE_VERSION)}
+        meta = {"_id": STATE_ID, "version": state.get("version", STATE_VERSION)}
         for field in META_FIELDS[1:]:
             if state.get(field) is not None:
                 meta[field] = state[field]
-        old_meta = {"_id": "state", "version": snap.get("version", STATE_VERSION)}
+        old_meta = {"_id": STATE_ID, "version": snap.get("version", STATE_VERSION)}
         for field in META_FIELDS[1:]:
             if snap.get(field) is not None:
                 old_meta[field] = snap[field]
         if meta != old_meta:
-            self.db.meta.replace_one({"_id": "state"}, meta, upsert=True)
+            self.db[COLL_STATE].replace_one({"_id": STATE_ID}, meta, upsert=True)
             counts["meta"] = 1
 
         # Новий знімок — щоб повторний save() у тому ж процесі не переписував

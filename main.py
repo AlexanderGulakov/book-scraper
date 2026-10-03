@@ -86,11 +86,26 @@ def load_env(path: Path | None = None) -> list[str]:
             continue
         key, _, value = line.partition("=")
         key = key.strip().removeprefix("set ").strip()
+        # Хвостовий коментар зрізаємо ДО лапок: `.env.example` сам показує
+        # рядки виду `TELEGRAM_CHAT_ID=-100…  # OLX-books`, і без цього в
+        # змінну їде «-100…  # OLX-books» — Telegram відповідає 400, а
+        # виглядає це як хибний chat_id. Коментарем вважаємо лише `#` після
+        # пробілу: у паролі MONGODB_URI решітка — звичайний символ.
+        value = re.sub(r"\s+#.*$", "", value)
         # Лапки й пробіли зрізаємо тут-таки: саме через них Telegram місяцями
         # відповідав 400 chat not found на локальній машині.
         value = value.strip().strip('"').strip("'").strip()
         if not key:
             continue
+        # Уже задана змінна головніша — але мовчати про це не можна: файл
+        # виправили, а процес бере старе, і ніщо на це не вказує.
+        current = os.environ.get(key)
+        if current is not None and current != value:
+            shown = "***" if any(s in key.upper() for s in ("TOKEN", "PASS", "URI", "SECRET")) else None
+            log.warning(
+                "%s у середовищі (%s) перебиває .env (%s). Щоб узяти значення з файлу: "
+                "Remove-Item Env:%s",
+                key, shown or current, shown or value, key)
         os.environ.setdefault(key, value)
         loaded.append(key)
     return loaded
@@ -802,7 +817,8 @@ def heartbeat_due(opt: dict[str, Any], ws: dict[str, Any]) -> bool:
 
 def run(cfg: dict[str, Any], state: dict[str, Any], *, dry_run: bool,
         only: list[str] | None = None, skip: list[str] | None = None,
-        store: Any = None, reports: bool = True) -> tuple[list[str], int]:
+        store: Any = None, reports: bool = True,
+        sender: Any = None) -> tuple[list[str], int]:
     """`store` потрібен лише для заявки на звіти (див. `Store.claim`).
 
     `reports=False` вимикає обидва глобальні звіти — про зняті з продажу і
@@ -861,7 +877,28 @@ def run(cfg: dict[str, Any], state: dict[str, Any], *, dry_run: bool,
     # надійний спосіб познайомитись з анти-ботом.
     desc_left = [int((defaults.get("description_max_fetch") or 0))]
 
+    # Яким пошуком іти в OLX. Змінна середовища головніша за конфіг навмисно:
+    # відкотитись на HTML має бути можливо змінною в налаштуваннях репозиторію,
+    # без коміту й без чекання на прогін. `api_fallback` рахує watch'і, яким
+    # довелось добирати HTML, — одна цифра в кінці прогону замість тиші.
+    search_api = (os.getenv("OLX_SEARCH")
+                  or str(defaults.get("search_backend") or "html")).lower() == "api"
+    api_fallback = [0]
+    log.info("Пошук OLX: %s", "JSON API" if search_api else "HTML-сторінки")
+
+    # Надсилання по ходу прогону. Злив робимо на ПОЧАТКУ кожної ітерації, а не
+    # в кінці: у циклі кілька `continue`, і будь-який із них обійшов би злив,
+    # поставлений унизу. Так знахідка з watch'а N їде, щойно почався N+1.
+    # Невдачі рахує сам `Sender` (.failed) — не тягнемо ще одне значення
+    # крізь повернення `run()`, бо його читає main() і так.
+    def flush() -> None:
+        if sender is None or dry_run or not messages:
+            return
+        sender.send(list(messages))
+        messages.clear()
+
     for idx, w in enumerate(cfg["watches"]):
+        flush()
         if w.get("enabled") is False:
             continue
         if not wanted(w, idx, only or [], skip or []):
@@ -896,6 +933,19 @@ def run(cfg: dict[str, Any], state: dict[str, Any], *, dry_run: bool,
                     mode=str(opt.get("mode", "latest")),
                     page_size=int(opt.get("page_size", 48)),
                 )
+            elif search_api:
+                # JSON-пошук: ушестеро легший за HTML і несе описи. Якщо він
+                # чомусь не віддався — не падаємо, а доробляємо цей watch по
+                # HTML і голосно пишемо в лог. Відкотити все одразу можна
+                # змінною OLX_SEARCH=html, без коміту.
+                try:
+                    ads = olx.fetch_watch_api(session, w["url"],
+                                              pages=int(opt.get("pages", 1)))
+                except olx.OlxError as exc:
+                    api_fallback[0] += 1
+                    log.warning("  ⚠ JSON-пошук не вдався (%s) — беру HTML", exc)
+                    ads = olx.fetch_watch(session, w["url"],
+                                          pages=int(opt.get("pages", 1)))
             else:
                 ads = olx.fetch_watch(session, w["url"], pages=int(opt.get("pages", 1)))
         except (olx.OlxError, bookflea.BookfleaError) as exc:
@@ -985,7 +1035,11 @@ def run(cfg: dict[str, Any], state: dict[str, Any], *, dry_run: bool,
 
             # Опис дістаємо один раз за життя оголошення і кладемо в стан:
             # він не змінюється, а коштує окремий запит.
-            desc = (prev or {}).get("desc")
+            # JSON-пошук несе опис одразу — тоді окремий запит не потрібен.
+            # Це не лише швидше: бюджет `description_max_fetch` обмежував нас
+            # сорока описами за прогін, тож решта оголошень проходила мовні
+            # фільтри наосліп. Тепер опис є в кожного.
+            desc = (prev or {}).get("desc") or getattr(ad, "description", None)
             if want_desc and desc is None and prev is None and desc_left[0] > 0:
                 desc = olx.fetch_description(session, ad.url)
                 desc_left[0] -= 1
@@ -1135,6 +1189,10 @@ def run(cfg: dict[str, Any], state: dict[str, Any], *, dry_run: bool,
             messages.extend(daily_book_report(cfg, state, store=store))
         except Exception as exc:  # noqa: BLE001
             log.warning("Денний звіт про ціни не склався: %s", exc)
+
+    if api_fallback[0]:
+        log.warning("JSON-пошук не спрацював у %s watch'ах — добирав HTML. "
+                    "Якщо це повторюється, перемкніть OLX_SEARCH=html.", api_fallback[0])
 
     if cheapest.buried:
         log.info("«Найдешевше зараз»: %s посилань виявились знятими — прибрав зі стану",
@@ -1408,16 +1466,30 @@ def main() -> int:
         log.info("Цього разу перевіряю %s з %s: %s", len(selected), len(cfg["watches"]),
                  ", ".join(str(w.get("name") or "?") for w in selected) or "нічого")
 
+    channels = notify.build_channels(cfg)
+    # Надсилаємо по ходу прогону, а не купою в кінці: знахідка з першого
+    # watch'а інакше чекає, доки відпрацюють решта тридцять і звіт про зняті.
+    sender = notify.Sender(channels) if channels and not args.dry_run else None
+
     messages, errors = run(cfg, state, dry_run=args.dry_run, only=args.only,
                            skip=args.skip, store=store,
-                           reports=not args.no_reports)
+                           reports=not args.no_reports, sender=sender)
 
-    channels = notify.build_channels(cfg)
-    undelivered = 0
     if messages and not channels:
         log.error("Є %s подій, але жодного налаштованого каналу сповіщень!", len(messages))
         errors += 1
         undelivered = len(messages)
+    elif sender is not None:
+        # Хвіст: останній watch і звіти. Через той самий Sender, щоб ліміт на
+        # прогін лишився спільним, а не подвоївся.
+        undelivered = sender.failed + sender.send(messages)
+        sender.finish()
+        if undelivered:
+            log.error("НЕ доставлено %s повідомлень — див. відповідь Telegram/SMTP вище",
+                      undelivered)
+            errors += 1
+        elif sender.sent:
+            log.info("Надіслано %s сповіщень (по ходу прогону)", sender.sent)
     else:
         undelivered = notify.dispatch(channels, messages)
         if messages and undelivered:

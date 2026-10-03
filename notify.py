@@ -17,7 +17,10 @@ import requests
 log = logging.getLogger("notify")
 
 TG_API = "https://api.telegram.org/bot{token}/{method}"
-MAX_MESSAGES_PER_RUN = 25  # запобіжник від флуду, якщо пошук раптом віддав сотні збігів
+MAX_MESSAGES_PER_RUN = 25
+# Telegram: ~30 повідомлень/сек загалом, але не більше одного на секунду в
+# той самий чат. Константа, а не літерал у циклі, щоб тести не спали.
+SEND_PAUSE = 1.2  # запобіжник від флуду, якщо пошук раптом віддав сотні збігів
 
 
 class Message(str):
@@ -356,7 +359,13 @@ def recent_chats() -> list[dict[str, Any]]:
             name = (chat.get("title") or chat.get("username")
                     or " ".join(x for x in (chat.get("first_name"), chat.get("last_name")) if x)
                     or "—")
-            found.setdefault(cid, {"id": cid, "type": chat.get("type", "?"), "title": name})
+            # Статус бота в чаті Telegram дає лише в my_chat_member. Де не дав —
+            # пишемо None, а не вигадуємо: «member» там, де ми не знаємо, —
+            # це готова відповідь «усе гаразд» на питання, яке ми не ставили.
+            status = ((node.get("new_chat_member") or {}).get("status")
+                      if key == "my_chat_member" else None)
+            found.setdefault(cid, {"id": cid, "type": chat.get("type", "?"),
+                                   "title": name, "status": status, "via": key})
     return list(found.values())
 
 
@@ -529,6 +538,16 @@ def dispatch(channels: list[Any], messages: list[str]) -> int:
         to_send.append(Message(
             f"… і ще <b>{overflow}</b> збігів цього разу (звузьте фільтри або зменште інтервал)."))
 
+    return _deliver(channels, to_send)
+
+
+def _deliver(channels: list[Any], to_send: list[Any]) -> int:
+    """Саме надсилання. Спільне для `dispatch` і `Sender`, щоб вони не
+    розійшлися: двічі виписаний цикл по каналах — це два місця, де можна
+    забути перевірити результат `send()`."""
+    # Повідомлення буває звичайним рядком (пульс, звіти) — зводимо до Message,
+    # щоб нижче можна було читати mark_id/cheap_id без перевірок на кожному кроці.
+    to_send = [m if isinstance(m, Message) else Message(m) for m in to_send]
     failed = 0
     for ch in channels:
         if isinstance(ch, Telegram):
@@ -540,9 +559,59 @@ def dispatch(channels: list[Any], messages: list[str]) -> int:
                 extra = {"keyboard": kb} if kb else {}
                 if not ch.send(str(msg), **extra):
                     failed += 1
-                time.sleep(1.2)  # Telegram: ~30 повідомлень/сек загалом, 1/сек у чат
+                time.sleep(SEND_PAUSE)
         elif isinstance(ch, Email):
             body = "<hr>".join(m.replace("\n", "<br>") for m in to_send)
             if not ch.send(f"OLX: {len(messages)} нових подій", body):
                 failed += 1
     return failed
+
+class Sender:
+    """Надсилання ПО ХОДУ прогону, зі спільним лімітом на весь прогін.
+
+    Навіщо. `run()` збирав усі повідомлення в список і віддавав їх одним
+    махом у самому кінці, тож знахідка в першому watch'і лежала, доки
+    відпрацюють решта тридцять і звіт про зняті. Заміряно на живому випадку
+    2026-10-03: оголошення знайдено о 19:49, надіслано о 19:51:40. Дві з
+    половиною хвилини чистої затримки.
+
+    ⚠ Тривалість прогону від цього НЕ росте: надсилань стільки ж, і пауза
+    1.2 с між ними та сама — вони просто відбуваються раніше, впереміж із
+    запитами, а не купою в кінці.
+
+    Ліміт `MAX_MESSAGES_PER_RUN` мусить лишитись НА ПРОГІН, а не на watch:
+    інакше запобіжник від флуду перетворився б на 25 × 31 повідомлення.
+    """
+
+    def __init__(self, channels: list[Any], limit: int = MAX_MESSAGES_PER_RUN) -> None:
+        self.channels = channels
+        self.left = int(limit)
+        self.sent = 0
+        self.failed = 0
+        self.skipped = 0
+
+    def send(self, messages: list[str]) -> int:
+        """Шле пачку, повертає кількість недоставлених."""
+        if not messages or not self.channels:
+            return 0
+        allowed = messages[:max(0, self.left)]
+        self.skipped += len(messages) - len(allowed)
+        self.left -= len(allowed)
+        if not allowed:
+            return 0
+        failed = _deliver(self.channels, allowed)
+        self.sent += len(allowed) - failed
+        self.failed += failed
+        return failed
+
+    def finish(self) -> None:
+        if self.skipped:
+            self.send_overflow_note()
+
+    def send_overflow_note(self) -> None:
+        note = Message(f"… і ще <b>{self.skipped}</b> збігів цього разу "
+                       f"(звузьте фільтри або зменште інтервал).")
+        self.left = 1
+        self.skipped = 0
+        self.send([note])
+

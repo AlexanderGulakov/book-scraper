@@ -89,6 +89,11 @@ jobs:
           # Можна перевизначити, якщо probe покаже іншу робочу версію:
           OLX_BACKEND: ${{ vars.OLX_BACKEND || 'curl_cffi' }}
           OLX_IMPERSONATE: ${{ vars.OLX_IMPERSONATE || 'chrome131' }}
+          # Аварійний відкат пошуку на HTML БЕЗ коміту: завести змінну
+          # репозиторію OLX_SEARCH=html (Settings → Secrets and variables →
+          # Actions → Variables). Порожнє значення означає «як у watches.yaml»,
+          # де зараз `search_backend: api`.
+          OLX_SEARCH: ${{ vars.OLX_SEARCH }}
         run: |
           # --skip Букфлі: книгарня віддає каталог за IP клієнта, і з
           # американської адреси runner'а це польський ринок — чужі

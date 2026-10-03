@@ -192,19 +192,19 @@ def test_price_history_records_a_change_and_ignores_a_repeat():
     store = fresh_store()
     state = sample_state()
     store.save(state)
-    assert store.db[storage.COLL_PRICES].count_documents({"adId": "111"}) == 1
+    assert store.db[storage.COLL_PRICES].count_documents({"a": "111"}) == 1
 
     # Та сама ціна, новий прогін — нового спостереження бути не має.
     state["watches"]["Стівен Кінг: Талісман"]["ads"]["111"]["seen"] = "2026-09-22T15:00:00+00:00"
     store.save(state)
-    assert store.db[storage.COLL_PRICES].count_documents({"adId": "111"}) == 1
+    assert store.db[storage.COLL_PRICES].count_documents({"a": "111"}) == 1
 
     # Подешевшало — з'являється друге.
     state["watches"]["Стівен Кінг: Талісман"]["ads"]["111"]["price"] = 150.0
     state["watches"]["Стівен Кінг: Талісман"]["ads"]["111"]["seen"] = "2026-09-22T16:00:00+00:00"
     store.save(state)
 
-    prices = sorted(d["price"] for d in store.db[storage.COLL_PRICES].find({"adId": "111"}))
+    prices = sorted(d["price"] for d in store.db[storage.COLL_PRICES].find({"a": "111"}))
     assert prices == [150.0, 250.0]
 
 
@@ -217,8 +217,8 @@ def test_price_history_outlives_the_ad():
     del state["watches"]["Стівен Кінг: Талісман"]["ads"]["111"]
     store.save(state)
 
-    assert store.db[storage.COLL_ADS].count_documents({"adId": "111"}) == 0
-    assert store.db[storage.COLL_PRICES].count_documents({"adId": "111"}) == 1
+    assert store.db[storage.COLL_ADS].count_documents({"a": "111"}) == 0
+    assert store.db[storage.COLL_PRICES].count_documents({"a": "111"}) == 1
 
 
 # ── reset і історія знятих ──────────────────────────────────────────────────
@@ -250,7 +250,10 @@ def test_sold_survives_a_re_listing_of_the_same_ad():
     state["sold"].append(again)
     store.save(state)
 
-    assert store.db[storage.COLL_SOLD].count_documents({"adId": "933340741"}) == 2
+    # ⚠ У `sold` верхньорівневі поля звуться інакше, ніж в `ads`: там `w`/`a`,
+    # тут `watch`/`id` — бо запис приходить із `state["sold"]` як є. Непослідовно,
+    # але так у живій базі, і тест має це фіксувати, а не прикрашати.
+    assert store.db[storage.COLL_SOLD].count_documents({"id": "933340741"}) == 2
 
 
 def test_sold_pruned_by_cutoff_disappears():
@@ -265,63 +268,75 @@ def test_sold_pruned_by_cutoff_disappears():
 
 # ── імена в базі ────────────────────────────────────────────────────────────
 
-def test_documents_use_readable_camelcase_names():
-    """На ці документи дивиться людина — у Compass, Studio 3T чи Atlas.
+def test_the_base_uses_the_same_field_names_as_memory():
+    """У базі ті самі імена полів, що й у пам'яті — і це свідомо.
 
-    У пам'яті поля лишились історичними (`cur`, `seen`, `miss`), бо на них
-    спирається півпроєкту; у базі вони мають бути повними й camelCase.
-    Тест сторожить саме межу між цими двома світами.
+    ⚠ Тут раніше стояв тест на читабельні camelCase-імена (`lastSeenAt`,
+    `soldListings`, `watcherState`): так виглядала домовленість 2026-09-22,
+    під неї написані `claude/mongo-storage.md` і цей файл. Реалізація не
+    закомітилась, тест падав півтора місяця й щоразу списувався «на
+    оточення» — разом із дев'ятьма сусідніми, які перевіряли вже потрібні
+    речі (prune, сироти, історія цін, `--reset`).
+
+    2026-10-03 вирішено перейменування НЕ доробляти: у живій базі лежать
+    документи зі старими іменами, отже ціна — разова міграція на бойових
+    даних заради косметики. Тест тепер сторожить справжній контракт: межі
+    між пам'яттю і базою немає, перекладу немає, і якщо його колись
+    заведуть — упаде саме тут.
     """
     store = fresh_store()
     store.save(sample_state())
 
-    ad = store.db[storage.COLL_ADS].find_one({"adId": "111"})
-    assert set(ad["_id"]) == {"watch", "adId"}
-    assert ad["currency"] == "UAH"
-    assert ad["lastSeenAt"] and ad["firstSeenAt"]
-    for short in ("cur", "seen", "first", "miss", "created", "w", "a"):
-        assert short not in ad, f"куце ім'я {short!r} протекло в базу"
+    ad = store.db[storage.COLL_ADS].find_one({"a": "111"})
+    assert set(ad["_id"]) == {"w", "a"}, "складений _id, а не рядок з роздільником"
+    # `w` і `a` продубльовані на верхньому рівні навмисно: щоб запит писався
+    # як {w: "Букфлі"}, а не {"_id.w": "Букфлі"}.
+    assert ad["w"] == "Стівен Кінг: Талісман" and ad["a"] == "111"
+    assert ad["cur"] == "UAH" and ad["seen"] and ad["first"]
 
     watch = store.db[storage.COLL_WATCHES].find_one({"_id": "Букфлі"})
-    assert watch["isSeeded"] is True
-    assert watch["lastRunAt"]
-    assert watch["recentAdIds"] == ["abc", "def"]
-    for short in ("seeded", "last_run", "window", "heartbeat_last"):
-        assert short not in watch
+    assert watch["seeded"] is True and watch["last_run"]
+    assert watch["window"] == ["abc", "def"]
+    assert "ads" not in watch, "оголошення живуть окремою колекцією, не всередині watch'а"
 
     sold = store.db[storage.COLL_SOLD].find_one({})
-    assert set(sold["_id"]) == {"watch", "adId", "goneAt"}
-    assert sold["goneAt"] and sold["daysListed"] == 19.7
-    for short in ("id", "cur", "days", "gone"):
-        assert short not in sold
+    # `g` (час зняття) у ключі: те саме оголошення можуть зняти, виставити
+    # знову і зняти вдруге — це два спостереження, а не одне.
+    assert set(sold["_id"]) == {"w", "a", "g"}
+    assert sold["gone"] and sold["days"] == 19.7
 
-    price = store.db[storage.COLL_PRICES].find_one({"adId": "111"})
-    assert set(price["_id"]) == {"adId", "seenAt"}
-    assert price["seenAt"] and price["currency"] == "UAH"
+    price = store.db[storage.COLL_PRICES].find_one({"a": "111"})
+    assert set(price["_id"]) == {"a", "at"}
+    assert price["at"] and price["cur"] == "UAH"
 
-    meta = store.db[storage.COLL_STATE].find_one({"_id": "watcher"})
-    assert meta["lastBookReportDate"] == "2026-09-22"
-    assert meta["lastSoldReportAt"]
-    for short in ("book_report_date", "sold_report_last"):
-        assert short not in meta
+    meta = store.db[storage.COLL_STATE].find_one({"_id": storage.STATE_ID})
+    assert meta["book_report_date"] == "2026-09-22" and meta["sold_report_last"]
 
 
-def test_collections_are_named_for_humans():
+def test_the_five_collections_are_the_ones_the_code_names():
+    """Імена колекцій мають жити в одному місці. Доки вони були літералами в
+    п'ятнадцяти викликах `self.db.ads`, перейменування означало пошук-заміну
+    по файлу й надію нічого не пропустити."""
     store = fresh_store()
     store.save(sample_state())
     assert set(store.db.list_collection_names()) == {
-        "watcherState", "watches", "ads", "soldListings", "priceHistory"}
+        storage.COLL_STATE, storage.COLL_WATCHES, storage.COLL_ADS,
+        storage.COLL_SOLD, storage.COLL_PRICES}
+    # Константи — не псевдоніми самих себе: якщо хтось змінить одну, впаде тут,
+    # а не мовчки в базі.
+    assert storage.COLL_STATE == "meta" and storage.COLL_PRICES == "price_observations"
 
 
-def test_an_unmapped_field_reaches_the_base_under_its_own_name():
-    """Якщо в main.py колись з'явиться нове поле, воно має потрапити в базу,
-    а не зникнути в перекладі."""
+def test_an_unknown_field_reaches_the_base_under_its_own_name():
+    """Якщо в main.py з'явиться нове поле, воно має потрапити в базу й
+    повернутись назад. Саме так колись доїхали `desc`, `an` і `told` — без
+    жодної правки storage.py."""
     store = fresh_store()
     state = sample_state()
     state["watches"]["Букфлі"]["ads"]["abc"]["sellerRating"] = 4.8
     store.save(state)
 
-    assert store.db[storage.COLL_ADS].find_one({"adId": "abc"})["sellerRating"] == 4.8
+    assert store.db[storage.COLL_ADS].find_one({"a": "abc"})["sellerRating"] == 4.8
     assert store.load()["watches"]["Букфлі"]["ads"]["abc"]["sellerRating"] == 4.8
 
 

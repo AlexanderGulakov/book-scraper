@@ -25,6 +25,11 @@ class Ad:
     author: str | None = None    # Bookflea вказує автора окремим полем
     source: str = "olx"          # яке джерело віддало оголошення
     matched: str | None = None   # яке ключове слово спрацювало (Bookflea)
+    # Опис приходить разом із видачею лише в JSON-пошуку OLX; у HTML-видачі
+    # його немає, і там він добувається окремим запитом (`fetch_description`).
+    # None означає «не знаємо», а не «опису немає» — на цій різниці тримаються
+    # мовні фільтри.
+    description: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)

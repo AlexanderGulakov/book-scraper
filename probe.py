@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
 import urllib.request
@@ -69,11 +70,23 @@ def rate_probe() -> int:
     підставу паузу зменшити.
 
     Тест малий навмисно: шість запитів на кожен інтервал, максимум 30 разом.
+
+    ⚠ Міряє ТОЙ САМИЙ запит, яким ходить прогін. Відколи пошук перейшов на
+    JSON (`search_backend: api`), це принципово: HTML-сторінка триває ~1.85 с,
+    виклик API — ~0.5 с, тож при однаковій паузі реальна частота ВТРИЧІ вища.
+    Заміряти HTML і з того робити висновок про паузу для API означало б
+    перенести число з одних умов в інші — рівно те, через що пауза 3 с колись
+    і з'явилась.
     """
     import fetcher
 
-    base = ("https://www.olx.ua/uk/hobbi-otdyh-i-sport/knigi-zhurnaly/q-%s/"
-            "?currency=UAH&search%%5Border%%5D=created_at%%3Adesc")
+    api = (os.getenv("OLX_SEARCH") or "api").lower() == "api"
+    if api:
+        base = (SEARCH_API_TMPL + "&query=%s")
+    else:
+        base = ("https://www.olx.ua/uk/hobbi-otdyh-i-sport/knigi-zhurnaly/q-%s/"
+                "?currency=UAH&search%%5Border%%5D=created_at%%3Adesc")
+    print(f"Міряю: {'JSON-пошук (/api/v1/offers/)' if api else 'HTML-сторінки пошуку'}\n")
     f = fetcher.Fetcher()
     f.warmup()
 
@@ -92,7 +105,7 @@ def rate_probe() -> int:
             except Exception:  # noqa: BLE001
                 status, body = 0, ""
             spent += time.time() - t0
-            if status == 200 and MARK in body:
+            if status == 200 and (MARK in body if not api else '"data"' in body):
                 ok += 1
             elif status in (403, 429, 503):
                 blocked += 1
@@ -119,6 +132,11 @@ def rate_probe() -> int:
 
 
 # ─────────────────────────────────────────────────── JSON-пошук замість HTML
+
+SEARCH_API_TMPL = (
+    "https://www.olx.ua/api/v1/offers/?category_id=49&limit=50&offset=0"
+    "&currency=UAH&sort_by=created_at%3Adesc"
+)
 
 API_URL = ("https://www.olx.ua/api/v1/offers/?query={q}&limit=50&offset=0"
            "&currency=UAH&sort_by=created_at%3Adesc")

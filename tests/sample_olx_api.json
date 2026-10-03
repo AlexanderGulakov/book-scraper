@@ -1,0 +1,233 @@
+{
+ "data": [
+  {
+   "id": 934223457,
+   "title": "Набір книг з домашньої бібліотеки 2 - 8.09.26",
+   "url": "https://www.olx.ua/d/uk/obyavlenie/nabr-knig-z-domashno-bbloteki-2-8-09-26-ID11dUch.html",
+   "created_time": "2026-09-08T18:45:36+03:00",
+   "description": "50.Юрій Винничук Вілла декера <br />\n51.Юрій ВинничукТанго смерті <br />",
+   "params": [
+    {
+     "key": "price",
+     "name": "Ціна за 1 шт. або комплект",
+     "type": "price",
+     "value": {
+      "value": 45000,
+      "currency": "UAH",
+      "negotiable": false,
+      "label": "45 000 грн."
+     }
+    },
+    {
+     "key": "state",
+     "name": "Стан",
+     "type": "select",
+     "value": {
+      "key": "used",
+      "label": "Вживане"
+     }
+    }
+   ],
+   "location": {
+    "city": {
+     "name": "Київ"
+    }
+   },
+   "photos": [
+    {
+     "link": "https://ireland.apollo.olxcdn.com:443/v1/files/z89ia2jemzd92-UA/image;s={width}x{height}"
+    }
+   ],
+   "promotion": {
+    "top_ad": true
+   },
+   "status": "active"
+  },
+  {
+   "id": 936739415,
+   "title": "Доки світло не згасне назавжди — Макс Кідрук",
+   "url": "https://www.olx.ua/d/uk/obyavlenie/doki-svtlo-ne-zgasne-nazavzhdi-maks-kdruk-ID11osIf.html",
+   "created_time": "2026-10-03T19:36:48+03:00",
+   "description": "Роман Макса Кідрука «Доки світло не згасне назавжди» у твердій обкладинці. Стан ідеальний",
+   "params": [
+    {
+     "key": "price",
+     "name": "Ціна за 1 шт. або комплект",
+     "type": "price",
+     "value": {
+      "value": 200,
+      "currency": "UAH",
+      "negotiable": false,
+      "label": "200 грн."
+     }
+    },
+    {
+     "key": "state",
+     "name": "Стан",
+     "type": "select",
+     "value": {
+      "key": "used",
+      "label": "Вживане"
+     }
+    }
+   ],
+   "location": {
+    "city": {
+     "name": "Ужгород"
+    }
+   },
+   "photos": [
+    {
+     "link": "https://ireland.apollo.olxcdn.com:443/v1/files/bn07ea1cfp7s-UA/image;s={width}x{height}"
+    }
+   ],
+   "promotion": {
+    "top_ad": false
+   },
+   "status": "active"
+  },
+  {
+   "id": 930879368,
+   "title": "Макс Кідрук - Бот. АТАКАМСЬКА КРИЗА - Книга 1",
+   "url": "https://www.olx.ua/d/uk/obyavlenie/maks-kdruk-bot-atakamska-kriza-kniga-1-ID10ZSfm.html",
+   "created_time": "2026-08-04T19:47:23+03:00",
+   "description": "Макс Кідрук - Бот. АТАКАМСЬКА КРИЗА - Книга 1, <br />\n<br />\nВідправка любою поштою",
+   "params": [
+    {
+     "key": "price",
+     "name": "Ціна за 1 шт. або комплект",
+     "type": "price",
+     "value": {
+      "value": 900,
+      "currency": "UAH",
+      "negotiable": false,
+      "label": "900 грн."
+     }
+    },
+    {
+     "key": "state",
+     "name": "Стан",
+     "type": "select",
+     "value": {
+      "key": "used",
+      "label": "Вживане"
+     }
+    }
+   ],
+   "location": {
+    "city": {
+     "name": "Запоріжжя"
+    }
+   },
+   "photos": [
+    {
+     "link": "https://ireland.apollo.olxcdn.com:443/v1/files/zmn4ixnnjq9j2-UA/image;s={width}x{height};r=90"
+    }
+   ],
+   "promotion": {
+    "top_ad": false
+   },
+   "status": "active"
+  },
+  {
+   "id": 925482422,
+   "title": "Продам різножанрову літературу",
+   "url": "https://www.olx.ua/d/uk/obyavlenie/prodam-rznozhanrovu-lteraturu-ID10DefQ.html",
+   "created_time": "2026-06-05T19:12:29+03:00",
+   "description": "Всі в гарному стані.<br />\n— Коко Шанель “Жизнь, рассказанная ею самой”<br />",
+   "params": [
+    {
+     "key": "price",
+     "name": "Ціна за 1 шт. або комплект",
+     "type": "price",
+     "value": {
+      "value": 650,
+      "currency": "UAH",
+      "negotiable": true,
+      "label": "650 грн."
+     }
+    },
+    {
+     "key": "state",
+     "name": "Стан",
+     "type": "select",
+     "value": {
+      "key": "used",
+      "label": "Вживане"
+     }
+    }
+   ],
+   "location": {
+    "city": {
+     "name": "Київ"
+    }
+   },
+   "photos": [
+    {
+     "link": "https://ireland.apollo.olxcdn.com:443/v1/files/ptf5rd214gt42-UA/image;s={width}x{height}"
+    }
+   ],
+   "promotion": {
+    "top_ad": false
+   },
+   "status": "active"
+  },
+  {
+   "id": 902681906,
+   "title": "Не озирайся і мовчи - Макс Кідрук",
+   "url": "https://www.olx.ua/d/uk/obyavlenie/ne-oziraysya-movchi-maks-kdruk-IDZ5yNA.html",
+   "created_time": "2025-10-08T17:43:25+03:00",
+   "description": "Уявіть, що на Землі існує місце, яке ніби застигло в часі.",
+   "params": [
+    {
+     "key": "price",
+     "name": "Ціна за 1 шт. або комплект",
+     "type": "price",
+     "value": {
+      "value": 300,
+      "currency": "UAH",
+      "negotiable": false,
+      "label": "300 грн."
+     }
+    },
+    {
+     "key": "state",
+     "name": "Стан",
+     "type": "select",
+     "value": {
+      "key": "used",
+      "label": "Вживане"
+     }
+    }
+   ],
+   "location": {
+    "city": {
+     "name": "Біла Церква"
+    }
+   },
+   "photos": [
+    {
+     "link": "https://ireland.apollo.olxcdn.com:443/v1/files/9acyenoxde9d3-UA/image;s={width}x{height}"
+    }
+   ],
+   "promotion": {
+    "top_ad": false
+   },
+   "status": "active"
+  }
+ ],
+ "metadata": {
+  "total_elements": 194,
+  "source": {
+   "promoted": [
+    0
+   ],
+   "organic": [
+    1,
+    2,
+    3,
+    4
+   ]
+  }
+ }
+}
