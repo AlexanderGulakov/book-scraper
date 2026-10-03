@@ -17,6 +17,7 @@ on:
           - dry-run     # знайти, показати в логах, нічого не надсилати
           - probe       # діагностика 403: яка стратегія обходить блок
           - rate        # заміряти, яку частоту запитів OLX терпить З ЦЬОГО IP
+          - api         # чи віддає OLX свій JSON-пошук (він ушестеро легший за HTML)
 
 concurrency:
   group: olx-watch
@@ -57,8 +58,21 @@ jobs:
           OLX_IMPERSONATE: ${{ vars.OLX_IMPERSONATE || 'chrome131' }}
         run: python probe.py --rate
 
+      # Головне невідоме для прискорення. HTML-сторінка пошуку коштує ~1.85 с і
+      # 3.1 МБ і НЕ містить описів; той самий запит через /api/v1/offers/ дав
+      # 0.4 с, 449 КБ і описи всіх 65 оголошень (заміряно з браузера 2026-10-03).
+      # Але міряли з української адреси й з кукою сесії. Чи віддається те саме
+      # раннеру Azure без кук — відповідає цей режим, і доки він не відповів,
+      # переписувати olx.py не можна.
+      - name: API probe (чи працює JSON-пошук з цієї адреси)
+        if: inputs.mode == 'api'
+        env:
+          OLX_BACKEND: ${{ vars.OLX_BACKEND || 'curl_cffi' }}
+          OLX_IMPERSONATE: ${{ vars.OLX_IMPERSONATE || 'chrome131' }}
+        run: python probe.py --api
+
       - name: Run watcher
-        if: inputs.mode != 'probe' && inputs.mode != 'rate'
+        if: inputs.mode != 'probe' && inputs.mode != 'rate' && inputs.mode != 'api'
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}

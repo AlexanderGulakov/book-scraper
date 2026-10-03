@@ -15,6 +15,7 @@ import json
 import sys
 import time
 import urllib.request
+from urllib.parse import quote
 
 DEFAULT_URL = (
     "https://www.olx.ua/uk/hobbi-otdyh-i-sport/knigi-zhurnaly/"
@@ -117,10 +118,76 @@ def rate_probe() -> int:
     return 0
 
 
+# ─────────────────────────────────────────────────── JSON-пошук замість HTML
+
+API_URL = ("https://www.olx.ua/api/v1/offers/?query={q}&limit=50&offset=0"
+           "&currency=UAH&sort_by=created_at%3Adesc")
+
+
+def api_probe() -> int:
+    """Чи віддає OLX свій JSON-пошук нашому клієнтові — і наскільки він дешевший.
+
+    Навіщо. Зараз один watch коштує HTML-сторінки пошуку (заміряно з браузера
+    2026-10-03: ~1.85 с, 3.1 МБ, 52 оголошення, описів немає), плюс окремий
+    запит на ОПИС кожного нового оголошення. Той самий запит через
+    `/api/v1/offers/` віддав 0.35-0.58 с, 449 КБ, 65 оголошень — **з описами**.
+    Тобто перехід прибирає і половину ваги, і цілий клас запитів.
+
+    ⚠ Алеміряли це з браузерної сесії того самого походження і з української
+    адреси. Чи працює воно з раннера GitHub (США, curl_cffi, без кук) — питання
+    без відповіді, і саме його вирішує цей режим. Поки відповіді немає,
+    переписувати `olx.py` не можна: ціна помилки — скрапер, який мовчить.
+    """
+    import fetcher
+
+    print(f"curl_cffi встановлено: {fetcher.HAS_CURL_CFFI}\n")
+    f = fetcher.Fetcher()
+    queries = ["гаррі поттер", "макс кідрук", "дім дивних дітей"]
+
+    ok = 0
+    print(f"{'запит':<22} {'статус':<8} {'час':>7} {'КБ':>7} {'оголошень':>10} {'з описом':>9}")
+    print("-" * 70)
+    for q in queries:
+        url = API_URL.format(q=quote(q))
+        t0 = time.time()
+        try:
+            status, body = f.get(url, timeout=30)
+        except Exception as exc:  # noqa: BLE001
+            print(f"{q:<22} {type(exc).__name__}: {str(exc)[:40]}")
+            continue
+        dt = time.time() - t0
+        n = desc = 0
+        if status == 200:
+            try:
+                data = (json.loads(body) or {}).get("data") or []
+                n = len(data)
+                desc = sum(1 for d in data if (d.get("description") or "").strip())
+                ok += 1
+            except ValueError:
+                status = "не JSON"
+        print(f"{q:<22} {str(status):<8} {dt:6.2f}с {len(body)/1024:6.0f} "
+              f"{n:>10} {desc:>9}")
+        time.sleep(1)
+
+    print()
+    if ok == len(queries):
+        print("➜ JSON-пошук працює з цієї адреси. Описи приходять разом із видачею,")
+        print("  отже окремі запити на опис стають непотрібні.")
+        return 0
+    if ok:
+        print("➜ Працює НЕ завжди — на таке спиратись не можна.")
+        return 1
+    print("➜ JSON-пошук з цієї адреси не віддається. Лишаємось на HTML.")
+    return 1
+
+
 def main() -> int:
     if "--rate" in sys.argv[1:]:
         where_am_i()
         return rate_probe()
+    if "--api" in sys.argv[1:]:
+        where_am_i()
+        return api_probe()
     url = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_URL
     where_am_i()
 
