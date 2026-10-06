@@ -103,7 +103,10 @@ def test_collect_search_mode_dedupes_across_keywords(monkeypatch):
 
 def test_end_to_end_seed_then_notify(monkeypatch):
     cfg = {
-        "defaults": {"exclude_keywords": ["фігурк"]},
+        # seed_notify_max: 0 — тест про те, що ПОВТОРНА та сама видача мовчить,
+        # а нове оголошення приходить. Поведінку самої стелі перевіряє
+        # tests/test_watcher.py::test_a_small_seed_is_sent_a_big_one_is_not.
+        "defaults": {"exclude_keywords": ["фігурк"], "seed_notify_max": 0},
         "watches": [{
             "id": "bf", "name": "Букфлі", "source": "bookflea",
             "mode": "latest", "use_default_excludes": False, "keywords": KEYWORDS,

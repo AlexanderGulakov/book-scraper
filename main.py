@@ -1017,6 +1017,7 @@ def run(cfg: dict[str, Any], state: dict[str, Any], *, dry_run: bool,
         want_desc = bool(opt.get("needs_description")) and source == "olx"
 
         new_cnt = drop_cnt = skip_cnt = quiet_cnt = dup_cnt = 0
+        seeded_msgs: list[tuple[Any, Any]] = []
         manual_ru = state.get("manual_ru") or {}
         for ad in kept:
             if ad.id in refused or ad.id in manual_ru:
@@ -1065,15 +1066,22 @@ def run(cfg: dict[str, Any], state: dict[str, Any], *, dry_run: bool,
                 continue
 
             if prev is None:
-                if d.notify and not first_run and not told_before(state, ad, "new"):
+                if d.notify and not told_before(state, ad, "new"):
                     cheap = cheapest.for_ad(name, ad)
-                    messages.append(notify.Message(notify.format_event(
+                    msg = notify.Message(notify.format_event(
                         "new", name, ad, verdict=_verdict(cfg, prof_map, name, ad),
                         mark=d.tag, cheapest=cheap),
                         mark_id=ad.id, cheap_id=(cheap or {}).get("id"),
-                        cheap_near=notify.cheap_is_near(cheap, ad)))
-                    remember_told(state, ad, now)
-                    new_cnt += 1
+                        cheap_near=notify.cheap_is_near(cheap, ad))
+                    if first_run:
+                        # Перший прогін watch'а. Рішення, слати чи мовчати,
+                        # ухвалюється ПІСЛЯ всього циклу — коли відомо, скільки
+                        # їх набралось. Див. `seed_notify_max` нижче.
+                        seeded_msgs.append((msg, ad))
+                    else:
+                        messages.append(msg)
+                        remember_told(state, ad, now)
+                        new_cnt += 1
                 elif not d.notify:
                     quiet_cnt += 1
                 elif d.notify and not first_run:
@@ -1130,7 +1138,33 @@ def run(cfg: dict[str, Any], state: dict[str, Any], *, dry_run: bool,
 
         if first_run:
             ws["seeded"] = True
-            log.info("  перший запуск: запам'ятав %s оголошень, сповіщення не слав", len(kept))
+            # 🔑 Перший прогін нового watch'а мовчав ЗАВЖДИ — і цим ковтав те
+            # саме оголошення, заради якого watch і додавали. Реальний випадок:
+            # «Продам комплект книг Гаррі Поттер» за 1100 грн лежав у видачі
+            # `q-комплект-гаррі-поттер`, збиральний watch його не бачить
+            # взагалі, а новий «Поттер: комплекти» зустрів його першим прогоном
+            # і проковтнув. Оголошення не надішлеться вже ніколи: наступні
+            # прогони бачать його як відоме.
+            #
+            # Мовчання саме по собі правильне — інакше новий watch вивалив би
+            # сотню повідомлень за весь ринок. Але правило має бути не «завжди
+            # мовчи», а «мовчи, якщо їх багато». Заміряно на `Поттер:
+            # комплекти`: зі 101 оголошення у видачі фільтри лишають 49, а до
+            # Telegram дійшли б 11 — одна нормальна пачка, не сотня.
+            cap = int(defaults.get("seed_notify_max", 15))
+            if seeded_msgs and len(seeded_msgs) <= cap:
+                for msg, ad in seeded_msgs:
+                    messages.append(msg)
+                    remember_told(state, ad, now)
+                log.info("  перший запуск: запам'ятав %s, з них надсилаю %s "
+                         "(стеля seed_notify_max=%s)", len(kept), len(seeded_msgs), cap)
+            elif seeded_msgs:
+                log.info("  перший запуск: запам'ятав %s; %s пройшли б у Telegram, "
+                         "але це більше за seed_notify_max=%s — мовчу",
+                         len(kept), len(seeded_msgs), cap)
+            else:
+                log.info("  перший запуск: запам'ятав %s оголошень, слати нема чого",
+                         len(kept))
         else:
             if dup_cnt:
                 log.info("  %s вже надсилали з іншого пошуку — мовчу", dup_cnt)

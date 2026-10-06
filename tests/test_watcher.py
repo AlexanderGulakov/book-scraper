@@ -83,7 +83,7 @@ def test_first_run_is_silent_then_detects_new_and_drop(monkeypatch, tmp_path=Non
         # денний звіт. З `min_stalled: 1` одне залежане оголошення у фікстурі
         # складає звіт, і він домішувався до списку повідомлень.
         "defaults": {"currency": "UAH", "min_drop_percent": 3,
-                     "analytics_enabled": False},
+                     "analytics_enabled": False, "seed_notify_max": 0},
         "watches": [{
             "id": "t", "name": "Тест", "url": "https://www.olx.ua/uk/list/q-test/",
             "max_price": 600, "exclude_keywords": ["копія"], "skip_promoted": True,
@@ -477,7 +477,10 @@ def test_heartbeat_fires_only_on_empty_run(monkeypatch, tmp_path):
             author="Фріда Мак-Фадден", source="bookflea")
 
     cfg = {
-        "defaults": {"currency": "UAH", "pause_between_watches": 0},
+        "defaults": {"currency": "UAH", "pause_between_watches": 0,
+                     # Тест про пульс, не про seed: стеля 0 лишає перший
+                     # прогін мовчазним, як було до 2026-10-06.
+                     "seed_notify_max": 0},
         "watches": [{
             "name": "Букфлі", "source": "bookflea", "mode": "search",
             "keywords": ["Служниця", "Кінг"], "max_price": 2000,
@@ -718,3 +721,72 @@ def test_task_template_is_valid_and_parametrised():
     # ноутбук: на батареї не стежимо, але пропущене надолужуємо
     assert tree.find(".//t:DisallowStartIfOnBatteries", ns).text == "true"
     assert tree.find(".//t:StartWhenAvailable", ns).text == "true"
+
+
+# ─────────────────────────────────────── перший прогін нового watch'а
+
+def _seed_cfg(cap, n):
+    """Конфіг із одним watch'ем і `n` придатними оголошеннями у видачі."""
+    return {
+        "defaults": {"currency": "UAH", "analytics_enabled": False,
+                     "pause_between_watches": 0, "pause_jitter": 0,
+                     "cheapest_verify": False, "seed_notify_max": cap},
+        "watches": [{"id": "s", "name": "Новий пошук", "url": "https://olx.ua/q",
+                     "max_price": 2000}],
+    }, n
+
+
+def _feed(n):
+    from models import Ad
+    return [Ad(id=str(i), title=f"Книжка {i}", url=f"https://olx.ua/{i}",
+               price=100.0 + i, currency="UAH", price_text=f"{100+i} грн.")
+            for i in range(n)]
+
+
+def test_a_small_seed_is_sent_a_big_one_is_not(monkeypatch):
+    """🔑 Перший прогін нового watch'а мовчав ЗАВЖДИ — і ковтав те саме
+    оголошення, заради якого watch додавали. Реальний випадок 2026-10-06:
+    «Продам комплект книг Гаррі Поттер» за 1100 грн лежав лише у видачі
+    `q-комплект-гаррі-поттер`; новий watch зустрів його першим прогоном,
+    проковтнув, і надіслати його вже не могло ніщо.
+
+    Мовчання саме по собі правильне: інакше новий watch вивалив би сотню
+    повідомлень за весь ринок. Правило має бути «мовчи, якщо їх багато».
+    """
+    cfg, _ = _seed_cfg(cap=15, n=0)
+
+    monkeypatch.setattr(app.olx, "fetch_watch", lambda *a, **k: _feed(3))
+    msgs, _ = app.run(cfg, {"version": 1, "watches": {}}, dry_run=False, reports=False)
+    assert len(msgs) == 3, "три знахідки — одна нормальна пачка, шлемо"
+
+    cfg_big, _ = _seed_cfg(cap=15, n=0)
+    monkeypatch.setattr(app.olx, "fetch_watch", lambda *a, **k: _feed(40))
+    msgs, _ = app.run(cfg_big, {"version": 1, "watches": {}}, dry_run=False, reports=False)
+    assert msgs == [], "сорок — це вже вивалювання ринку, мовчимо"
+
+
+def test_a_sent_seed_is_remembered_and_not_repeated(monkeypatch):
+    """Інакше другий прогін надіслав би те саме вдруге: для нього оголошення
+    вже не нові за станом watch'а, але `told` — спільна пам'ять."""
+    cfg, _ = _seed_cfg(cap=15, n=0)
+    state = {"version": 1, "watches": {}}
+    monkeypatch.setattr(app.olx, "fetch_watch", lambda *a, **k: _feed(3))
+
+    first, _ = app.run(cfg, state, dry_run=False, reports=False)
+    assert len(first) == 3
+    assert len(state.get("told") or {}) == 3, "надіслане має лягти в told"
+
+    second, _ = app.run(cfg, state, dry_run=False, reports=False)
+    assert second == []
+
+
+def test_a_swallowed_seed_does_not_pretend_it_sent_anything(monkeypatch):
+    """Коли стеля перевищена — нічого не йде ні в Telegram, ні в `told`.
+    Інакше оголошення лишилось би «вже розказаним» і не прийшло б ніколи."""
+    cfg, _ = _seed_cfg(cap=2, n=0)
+    state = {"version": 1, "watches": {}}
+    monkeypatch.setattr(app.olx, "fetch_watch", lambda *a, **k: _feed(5))
+
+    msgs, _ = app.run(cfg, state, dry_run=False, reports=False)
+    assert msgs == []
+    assert not (state.get("told") or {}), "мовчали — отже нічого не розказували"
