@@ -180,6 +180,44 @@ def _regions(t: str, include: Iterable[str]) -> int:
     return n
 
 
+_WORDCHAR = re.compile(r"[^\W_]", re.UNICODE)
+
+
+def _spans(entry: dict[str, Any], t: str) -> list[tuple[int, int]]:
+    """Де в тексті видно цю позицію каталогу (найдовші збіги її слів)."""
+    out: list[tuple[int, int]] = []
+    for w in list(entry.get("all") or []) + list(entry.get("any") or []):
+        w = (w or "").casefold()
+        if not w:
+            continue
+        i = t.find(w)
+        while i >= 0:
+            out.append((i, i + len(w)))
+            i = t.find(w, i + 1)
+    return out
+
+
+def _touching_titles(t: str, entries: Iterable[dict[str, Any]]) -> bool:
+    """Чи стоять назви двох РІЗНИХ книжок упритул — без слів між ними.
+
+    «Місто кісток Місто попелу» — так (між збігами лише пробіл).
+    «Дім дивних дітей. Книга 6. Спустошення…» — ні: між ними «Книга 6»,
+    тобто це одна книжка, підписана серією і номером тому.
+    """
+    marked: list[tuple[int, int, str]] = []
+    for e in entries:
+        name = str(e.get("name") or "")
+        for s, end in _spans(e, t):
+            marked.append((s, end, name))
+    marked.sort()
+    for (s1, e1, n1), (s2, e2, n2) in zip(marked, marked[1:]):
+        if n1 == n2 or s2 < e1:
+            continue
+        if not _WORDCHAR.search(t[e1:s2]):
+            return True
+    return False
+
+
 def looks_like_bundle(text: str, watch_name: str = "", *,
                       catalog: Iterable[dict[str, Any]] = (),
                       include: Iterable[str] = (),
@@ -201,4 +239,19 @@ def looks_like_bundle(text: str, watch_name: str = "", *,
         return True
 
     n = distinct_books(entries) if entries else _regions(t, include)
-    return n >= min_repeats and bool(_ENUM.search(t))
+    if n < min_repeats:
+        return False
+    if _ENUM.search(t):
+        return True
+
+    # 3. Дві назви книжок ВПРИТУЛ, без жодного роздільника: «Місто кісток
+    #    Місто попелу Кассандра Клер». Роздільника тут немає, тому правило
+    #    вище мовчало, і такий лот рахувався однією книжкою (на живій видачі
+    #    Клер 2026-10-06 — 2 з 11 справжніх комплектів).
+    #
+    #    Вимога «впритул» тут суттєва, а не для краси: без неї ламається
+    #    протилежний випадок, де назва серії збігається з назвою першої
+    #    книжки — «Дім дивних дітей. Книга 6. Спустошення Диявольского Акра».
+    #    Там між двома збігами стоїть «Книга 6», тобто це ОДНА книжка,
+    #    підписана і серією, і томом.
+    return bool(entries) and _touching_titles(t, entries)

@@ -8,6 +8,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import bundles          # noqa: E402
 import rules
 
 
@@ -156,6 +157,35 @@ def test_skip_entry_wins_over_everything():
     d = rules.decide(title="Новий Герміона Hermione Гаррі Поттер подарунок магія шоу",
                      price=50, watch=HP, entry=entry)
     assert d.action == "skip"
+
+
+def test_skip_unless_bundle_lets_the_set_through_but_not_the_single_book():
+    """«Ця книжка в нас уже є» — але в комплекті з іншими вона потрібна.
+
+    Привід (2026-10-06): «Місто кісток» була позначена `skip: true` плюс
+    ручним списком `not: [місто попелу, …, комплект, набір]`. Виходив другий
+    детектор комплекту просто в каталозі — і він ламав справжній: `not:` не
+    давав позиції збігтися, тож «Місто кісток Місто попелу» рахувалось однією
+    книжкою. Тепер рішення приймає той самий `is_bundle_text`, що й усі решта.
+    """
+    catalog = [
+        {"name": "Клер: Місто кісток (уже є)", "all": ["місто кісток"],
+         "skip_unless_bundle": True},
+        {"name": "Клер: Місто попелу", "any": ["місто попелу"]},
+    ]
+    watch = {"max_price": None, "notify_max_price": 400,
+             "notify_max_price_bundle": 2000, "drop_russian": False,
+             "drop_english": False}
+
+    def decide(title, price):
+        entry = next((e for e in catalog
+                      if bundles.entry_matches(e, title, "Клер")), None)
+        return rules.decide(title=title, price=price, watch=watch, entry=entry,
+                            watch_name="Клер", catalog=catalog)
+
+    assert decide("Місто кісток Кассандра Клер", 350).action == "skip"
+    assert decide("Місто кісток Місто попелу Кассандра Клер", 900).notify
+    assert decide("Серія книг «Місто кісток» Кассандра Клер | Трилогія", 1600).notify
 
 
 def test_ad_without_price_is_remembered_but_silent():

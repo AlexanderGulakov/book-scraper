@@ -249,6 +249,19 @@ def decide(*, title: str, price: float | None, watch: dict[str, Any],
     if entry is not None and entry.get("skip"):
         return Decision("skip", reason=f"каталог: {entry.get('name')} позначено skip")
 
+    # 1а. «Ця книжка в нас уже є — але в комплекті з іншими потрібна». Раніше
+    #     це писали в каталозі вручну: `skip: true` плюс `not: [інші томи,
+    #     комплект, набір…]`. Виходив другий, гірший детектор комплекту —
+    #     і він ламав перший: `not:` не давав позиції збігтися, тож
+    #     `distinct_books` бачив у «Місто кісток Місто попелу» одну книжку.
+    #     Тепер рішення приймає той самий `is_bundle_text`, що й усі решта.
+    if entry is not None and entry.get("skip_unless_bundle"):
+        if not is_bundle_text(hay, watch_name or str(watch.get("name") or ""),
+                              catalog=catalog, include=include,
+                              bundle_keywords=watch.get("bundle_keywords") or ()):
+            return Decision(
+                "skip", reason=f"каталог: {entry.get('name')} — потрібна лише в комплекті")
+
     # 2. Слова-вбивці. На відміну від exclude_keywords вони дивляться і в опис,
     #    бо видавництво в заголовку не пишуть майже ніколи.
     for w in list(_opt(entry, watch, "drop_keywords", default=[]) or []):
