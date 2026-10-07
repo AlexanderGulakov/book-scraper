@@ -89,7 +89,13 @@ jobs:
         env:
           OLX_BACKEND: ${{ vars.OLX_BACKEND || 'curl_cffi' }}
           OLX_IMPERSONATE: ${{ vars.OLX_IMPERSONATE || 'chrome131' }}
-        run: python probe.py --api
+        run: |
+          python probe.py --api
+          # Другий замір у тому самому прогоні: наскільки свіжу видачу
+          # бачить САМЕ ЦЯ адреса. Запускати одночасно з домашнім
+          # `py probe.py --freshness` і звіряти UTC-штамп у шапці —
+          # різниця в хвилинах і є ціна географії раннера.
+          python probe.py --freshness
 
       - name: Run watcher
         if: inputs.mode != 'probe' && inputs.mode != 'rate' && inputs.mode != 'api'

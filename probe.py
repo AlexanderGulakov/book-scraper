@@ -7,6 +7,7 @@
 
 Запуск:  python probe.py [url]
          python probe.py --rate     — скільки запитів поспіль OLX терпить
+         python probe.py --freshness — наскільки свіжу видачу бачить ця адреса
 """
 
 from __future__ import annotations
@@ -40,8 +41,19 @@ def where_am_i() -> None:
     try:
         with urllib.request.urlopen("https://ipinfo.io/json", timeout=15) as r:
             info = json.loads(r.read())
-        print(f"IP: {info.get('ip')}  ·  {info.get('org')}  ·  {info.get('country')}")
-        print(f"Хостинг-провайдер у полі org — ознака дата-центру.\n")
+        org = str(info.get("org") or "")
+        print(f"IP: {info.get('ip')}  ·  {org}  ·  {info.get('country')}")
+        # Раніше підказка про дата-центр друкувалась завжди — і домашній
+        # Київстар теж підписувався як хостинг через «PJSC» у назві.
+        # Діагностика, яка бреше про очевидне, підриває довіру до решти цифр.
+        hosting = ("azure", "microsoft", "amazon", "aws", "google", "digitalocean",
+                   "hetzner", "ovh", "linode", "vultr", "cloudflare", "oracle",
+                   "contabo", "scaleway", "datacenter", "hosting")
+        if any(w in org.casefold() for w in hosting):
+            print("➜ Схоже на дата-центр: репутація IP і свіжість видачі "
+                  "можуть відрізнятись від домашнього провайдера.\n")
+        else:
+            print()
     except Exception as exc:  # noqa: BLE001
         print(f"IP визначити не вдалось: {exc}\n")
 
@@ -199,7 +211,71 @@ def api_probe() -> int:
     return 1
 
 
+def freshness_probe() -> int:
+    """Наскільки свіжу видачу бачить ЦЯ адреса.
+
+    Привід (тест 2026-10-08): оголошення пройшло модерацію о 20:42, покупець
+    оформив доставку о 20:51, у браузері з домашнього IP воно з'явилось у
+    видачі о 20:52, а прогін на раннері не бачив його ще й о 20:54. Тобто
+    питання не «як часто питати», а «чи всі клієнти бачать той самий індекс».
+
+    Міряємо вік найсвіжіших оголошень: `зараз − last_refresh_time`. Якщо з
+    раннера Azure мінімум стабільно більший, ніж із домашнього українського
+    IP у ту саму хвилину, — ми програємо хвилини на географії, і скрапер
+    треба переносити додому.
+
+    Запускати ОДНОЧАСНО в обох місцях і звіряти UTC-штамп у шапці.
+    """
+    import fetcher
+    from datetime import datetime, timezone
+
+    where_am_i()
+    f = fetcher.Fetcher()
+    targets = [
+        ("стрічка категорії", SEARCH_API_TMPL),
+        ("запит «книга»", API_URL.format(q=quote("книга"))),
+        ("запит «гаррі поттер»", API_URL.format(q=quote("гаррі поттер"))),
+    ]
+    print(f"\nЗамір о {datetime.now(timezone.utc).isoformat(timespec='seconds')} UTC\n")
+    print(f"{'джерело':<22} {'органічних':>10} {'найсвіжіше':>11} {'медіана':>9}")
+    print("-" * 56)
+    worst = 0
+    for name, url in targets:
+        try:
+            status, body = f.get(url, timeout=30)
+            data = (json.loads(body) or {}).get("data") or []
+        except Exception as exc:  # noqa: BLE001
+            print(f"{name:<22} {type(exc).__name__}: {str(exc)[:30]}")
+            continue
+        now = datetime.now(timezone.utc)
+        ages = []
+        for d in data:
+            if ((d.get("promotion") or {}).get("top_ad")):
+                continue
+            ts = d.get("last_refresh_time")
+            if not ts:
+                continue
+            try:
+                ages.append((now - datetime.fromisoformat(ts)).total_seconds())
+            except ValueError:
+                pass
+        if not ages:
+            print(f"{name:<22} {'—':>10}")
+            continue
+        ages.sort()
+        mid = ages[len(ages) // 2]
+        worst = max(worst, ages[0])
+        print(f"{name:<22} {len(ages):>10} {ages[0]/60:>9.1f} хв {mid/60:>7.1f} хв")
+        time.sleep(1)
+
+    print("\n➜ Порівняйте «найсвіжіше» з тим, що в ту саму хвилину показує")
+    print("  домашній браузер. Різниця в хвилинах = ціна географії раннера.")
+    return 0
+
+
 def main() -> int:
+    if "--freshness" in sys.argv[1:]:
+        return freshness_probe()
     if "--rate" in sys.argv[1:]:
         where_am_i()
         return rate_probe()
