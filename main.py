@@ -36,6 +36,7 @@ STATE_VERSION = storage.STATE_VERSION
 REQUIRED_API = {
     "notify": ["build_channels", "dispatch", "format_event", "format_test",
                "format_heartbeat", "format_watch_error", "format_cheapest",
+               "format_loop_alarm", "format_loop_ok",
                "poll_marks", "confirm_mark", "Message"],
     "olx": ["build_session", "fetch_watch", "matches", "price_ok", "ad_state",
             "fetch_description"],
@@ -1331,6 +1332,194 @@ def explain_ad(cfg: dict[str, Any], url: str) -> int:
     return 0
 
 
+def one_pass(args: Any, cfg: dict[str, Any], store: Any) -> int:
+    """Один повний прохід: стан → watch'і → сповіщення → збереження.
+
+    Винесено з `main()` заради `--loop`: у циклі той самий процес робить
+    прохід за проходом, не платячи щоразу за старт раннера, `pip install`,
+    прогрів curl_cffi і конект до Mongo. Стан читається й пишеться КОЖНОГО
+    проходу, бо в ту саму базу паралельно пише домашній Букфлі.
+    """
+    state = store.reset() if args.reset else store.load()
+
+    gone = forget_orphans(cfg, state)
+    if gone:
+        log.info("Прибрав зі стану watch'і, яких уже немає в конфізі: %s", ", ".join(gone))
+
+    selected = [w for i, w in enumerate(cfg["watches"])
+                if w.get("enabled") is not False and wanted(w, i, args.only, args.skip)]
+    if args.only or args.skip:
+        log.info("Цього разу перевіряю %s з %s: %s", len(selected), len(cfg["watches"]),
+                 ", ".join(str(w.get("name") or "?") for w in selected) or "нічого")
+
+    channels = notify.build_channels(cfg)
+    # Надсилаємо по ходу прогону, а не купою в кінці: знахідка з першого
+    # watch'а інакше чекає, доки відпрацюють решта тридцять і звіт про зняті.
+    sender = notify.Sender(channels) if channels and not args.dry_run else None
+
+    messages, errors = run(cfg, state, dry_run=args.dry_run, only=args.only,
+                           skip=args.skip, store=store,
+                           reports=not args.no_reports, sender=sender)
+
+    if messages and not channels:
+        log.error("Є %s подій, але жодного налаштованого каналу сповіщень!", len(messages))
+        errors += 1
+        undelivered = len(messages)
+    elif sender is not None:
+        # Хвіст: останній watch і звіти. Через той самий Sender, щоб ліміт на
+        # прогін лишився спільним, а не подвоївся.
+        undelivered = sender.failed + sender.send(messages)
+        sender.finish()
+        if undelivered:
+            log.error("НЕ доставлено %s повідомлень — див. відповідь Telegram/SMTP вище",
+                      undelivered)
+            errors += 1
+        elif sender.sent:
+            log.info("Надіслано %s сповіщень (по ходу прогону)", sender.sent)
+    else:
+        undelivered = notify.dispatch(channels, messages)
+        if messages and undelivered:
+            log.error("НЕ доставлено %s повідомлень — див. відповідь Telegram/SMTP вище", undelivered)
+            errors += 1
+        elif messages:
+            log.info("Надіслано %s сповіщень", len(messages))
+
+    # Стан зберігаємо, ЛИШЕ якщо все доїхало. Інакше оголошення осіло б у
+    # state як «вже бачене», і після полагодження каналу про нього б ніхто
+    # не дізнався — саме так хибний chat_id тихо з'їдав знахідки. Ціна —
+    # можливий дубль тих повідомлень, що встигли пройти до збою.
+    if undelivered:
+        log.error("Стан НЕ збережено: наступний прогін спробує надіслати ці ж події ще раз")
+    else:
+        store.save(state)
+        log.info("Стан збережено: %s", store.describe())
+
+    # Не валимо workflow через тимчасову помилку мережі, якщо хоч щось спрацювало.
+    if errors and errors >= max(len(selected), 1):
+        return 1
+    return 0
+
+
+def run_loop(args: Any, cfg: dict[str, Any], store: Any) -> int:
+    """`--loop`: проходи кожні `--loop-seconds`, доки не вичерпано `--deadline-minutes`.
+
+    Чотири правила, кожне заради того, щоб цикл не став новою точкою відмови:
+
+    1. Виняток в одному проході НЕ валить цикл — наступний піде за розкладом.
+       Інакше одна мережева помилка коштувала б тиші до наступного крона, а в
+       циклі «наступний крон» — це аж новий раннер.
+    2. `--max-fails` невдач поспіль — виходимо з кодом 1. Процес, у якому
+       зламалась сесія чи конект до Mongo, лікується новим раннером, а не
+       наступною спробою в тому самому процесі; watchdog-dispatch його підніме.
+    3. Дедлайн перевіряється ДО сну: якщо наступний прохід не встигне
+       вкластися, виходимо самі. Інакше GitHub уб'є джоб по `timeout-minutes`
+       посеред запису стану.
+    4. Про поломку пишемо в Telegram — див. `_alarm()`. Без цього цикл, що
+       впав, виглядає з боку Telegram точно як «нічого не знайшлось».
+
+    Конфіг перечитується, якщо файл змінився на диску — вдома це рятує від
+    перезапуску заради однієї правки в `watches.yaml`; в Actions чекаут
+    статичний, тож там це просто нічого не робить.
+    """
+    period = max(20.0, float(args.loop_seconds))
+    deadline = (time.monotonic() + float(args.deadline_minutes) * 60
+                if args.deadline_minutes else None)
+    cfg_mtime = _cfg_mtime(args.config)
+    passes = ok = fails = 0
+    alarmed = False          # чи вже писали в Telegram про ЦЮ серію невдач
+    last_exc: Any = None
+    log.info("Цикл: прохід кожні %.0f с, %s", period,
+             f"дедлайн {args.deadline_minutes:.0f} хв" if deadline else "без дедлайну")
+    while True:
+        started = time.monotonic()
+        try:
+            rc = one_pass(args, cfg, store)
+            ok += rc == 0
+            if rc:
+                fails += 1
+                last_exc = "прохід завершився з помилками (деталі в логах)"
+            else:
+                if alarmed:
+                    _alarm(args, cfg, notify.format_loop_ok(
+                        fails, minutes=fails * period / 60))
+                    alarmed = False
+                fails = 0
+        except Exception as exc:  # noqa: BLE001
+            fails += 1
+            last_exc = exc
+            log.exception("Прохід впав (%s поспіль): %s", fails, exc)
+        passes += 1
+        # --reset має сенс лише на першому проході, інакше цикл щохвилини
+        # робив би seed і мовчав назавжди.
+        args.reset = False
+
+        if args.max_fails and fails >= int(args.max_fails):
+            log.error("%s невдалих проходів поспіль — виходжу, хай підніметься "
+                      "свіжий раннер", fails)
+            _alarm(args, cfg, notify.format_loop_alarm(fails, last_exc, fatal=True))
+            return 1
+
+        # Тривога — рівно раз на серію, а не на кожен прохід: при аварії OLX
+        # це була б тридцятка однакових повідомлень за годину.
+        if not alarmed and args.alert_after and fails >= int(args.alert_after):
+            _alarm(args, cfg, notify.format_loop_alarm(fails, last_exc))
+            alarmed = True
+
+        mtime = _cfg_mtime(args.config)
+        if mtime != cfg_mtime:
+            cfg_mtime = mtime
+            try:
+                cfg = load_config(args.config)
+                log.info("Конфіг перечитано: %s", args.config)
+            except Exception as exc:  # noqa: BLE001
+                log.error("Новий конфіг не читається (%s) — лишаю попередній", exc)
+
+        took = time.monotonic() - started
+        nxt = started + period
+        if deadline is not None and nxt + took >= deadline:
+            log.info("Дедлайн: %s проходів, з них вдалих %s. Виходжу штатно.",
+                     passes, ok)
+            return 0 if ok else 1
+        sleep_for = nxt - time.monotonic()
+        if sleep_for > 0:
+            time.sleep(sleep_for)
+        else:
+            log.warning("Прохід (%.0f с) довший за період (%.0f с) — наступний "
+                        "починаю одразу", took, period)
+
+
+def _alarm(args: Any, cfg: dict[str, Any], text: str) -> None:
+    """Сповіщення про стан самого циклу — повз `Sender` і повз ліміт на прогін.
+
+    Саме повз: ліміт 25 повідомлень існує, щоб знахідки не залили чат, а
+    «скрапер лежить» не має в нього впиратись. І повз стан теж — тривога
+    нікуди не зберігається, тож її не «з'їсть» невдалий запис у Mongo.
+
+    Жодна помилка тут не має права підняти виняток: якщо Telegram недоступний,
+    це ще не привід зупиняти цикл, який саме намагається вижити.
+    """
+    if getattr(args, "dry_run", False):
+        log.info("[dry-run] тривога не надсилається: %s", text.splitlines()[0])
+        return
+    try:
+        channels = notify.build_channels(cfg)
+        if not channels:
+            log.error("Нікуди надіслати тривогу: жодного каналу сповіщень")
+            return
+        if notify.dispatch(channels, [text]):
+            log.error("Тривога НЕ доставлена — див. відповідь Telegram вище")
+    except Exception as exc:  # noqa: BLE001
+        log.error("Не вдалось надіслати тривогу (%s) — цикл продовжую", exc)
+
+
+def _cfg_mtime(path: Path) -> float | None:
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return None
+
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", default="watches.yaml", type=Path)
@@ -1365,6 +1554,25 @@ def main() -> int:
                     help="чому конкретне оголошення прийшло або не прийшло")
     ap.add_argument("--find-chat", action="store_true",
                     help="показати chat_id чатів, де бот нещодавно бачив повідомлення")
+    # --- Цикл у межах одного процесу ----------------------------------------
+    # Холодний старт (черга раннера + checkout + pip install) коштує 1-1.5 хв на
+    # КОЖЕН запуск, а сам прохід — ~40 с. Тому замість тридцяти запусків за
+    # годину вигідніший один, який усередині робить прохід щохвилини.
+    ap.add_argument("--loop", action="store_true",
+                    help="не виходити після проходу, а повторювати його")
+    ap.add_argument("--loop-seconds", type=float, default=60,
+                    help="період проходу в циклі (за замовч. 60 с)")
+    ap.add_argument("--deadline-minutes", type=float, default=0,
+                    help="скільки хвилин крутитись; 0 — без обмеження. Має бути "
+                         "помітно меншим за timeout-minutes воркфлоу, інакше "
+                         "GitHub уб'є джоб посеред запису стану")
+    ap.add_argument("--max-fails", type=int, default=5,
+                    help="скільки невдалих проходів поспіль терпіти, перш ніж "
+                         "вийти з кодом 1 (хай підніметься свіжий раннер)")
+    ap.add_argument("--alert-after", type=int, default=2,
+                    help="після скількох невдалих проходів поспіль писати "
+                         "тривогу в Telegram; 0 — не писати. Повідомлення одне "
+                         "на серію, плюс «знову працює» після відновлення")
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()
 
@@ -1488,65 +1696,12 @@ def main() -> int:
     store = storage.open_store(state_path=args.state, mode=args.storage,
                                uri=args.mongo_uri, db_name=args.mongo_db)
     log.info("Стан: %s", store.describe())
-    state = store.reset() if args.reset else store.load()
-
-    gone = forget_orphans(cfg, state)
-    if gone:
-        log.info("Прибрав зі стану watch'і, яких уже немає в конфізі: %s", ", ".join(gone))
-
-    selected = [w for i, w in enumerate(cfg["watches"])
-                if w.get("enabled") is not False and wanted(w, i, args.only, args.skip)]
-    if args.only or args.skip:
-        log.info("Цього разу перевіряю %s з %s: %s", len(selected), len(cfg["watches"]),
-                 ", ".join(str(w.get("name") or "?") for w in selected) or "нічого")
-
-    channels = notify.build_channels(cfg)
-    # Надсилаємо по ходу прогону, а не купою в кінці: знахідка з першого
-    # watch'а інакше чекає, доки відпрацюють решта тридцять і звіт про зняті.
-    sender = notify.Sender(channels) if channels and not args.dry_run else None
-
-    messages, errors = run(cfg, state, dry_run=args.dry_run, only=args.only,
-                           skip=args.skip, store=store,
-                           reports=not args.no_reports, sender=sender)
-
-    if messages and not channels:
-        log.error("Є %s подій, але жодного налаштованого каналу сповіщень!", len(messages))
-        errors += 1
-        undelivered = len(messages)
-    elif sender is not None:
-        # Хвіст: останній watch і звіти. Через той самий Sender, щоб ліміт на
-        # прогін лишився спільним, а не подвоївся.
-        undelivered = sender.failed + sender.send(messages)
-        sender.finish()
-        if undelivered:
-            log.error("НЕ доставлено %s повідомлень — див. відповідь Telegram/SMTP вище",
-                      undelivered)
-            errors += 1
-        elif sender.sent:
-            log.info("Надіслано %s сповіщень (по ходу прогону)", sender.sent)
-    else:
-        undelivered = notify.dispatch(channels, messages)
-        if messages and undelivered:
-            log.error("НЕ доставлено %s повідомлень — див. відповідь Telegram/SMTP вище", undelivered)
-            errors += 1
-        elif messages:
-            log.info("Надіслано %s сповіщень", len(messages))
-
-    # Стан зберігаємо, ЛИШЕ якщо все доїхало. Інакше оголошення осіло б у
-    # state як «вже бачене», і після полагодження каналу про нього б ніхто
-    # не дізнався — саме так хибний chat_id тихо з'їдав знахідки. Ціна —
-    # можливий дубль тих повідомлень, що встигли пройти до збою.
-    if undelivered:
-        log.error("Стан НЕ збережено: наступний прогін спробує надіслати ці ж події ще раз")
-    else:
-        store.save(state)
-        log.info("Стан збережено: %s", store.describe())
-    store.close()
-
-    # Не валимо workflow через тимчасову помилку мережі, якщо хоч щось спрацювало.
-    if errors and errors >= max(len(selected), 1):
-        return 1
-    return 0
+    try:
+        if args.loop:
+            return run_loop(args, cfg, store)
+        return one_pass(args, cfg, store)
+    finally:
+        store.close()
 
 
 if __name__ == "__main__":
