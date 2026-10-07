@@ -8,7 +8,7 @@ import logging
 import os
 import smtplib
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from email.message import EmailMessage
 from typing import Any
 
@@ -18,6 +18,13 @@ log = logging.getLogger("notify")
 
 TG_API = "https://api.telegram.org/bot{token}/{method}"
 MAX_MESSAGES_PER_RUN = 25
+
+# Наскільки пізніше за створення OLX може сам підняти свіже оголошення, і це
+# все ще ТА САМА публікація, а не повторний продаж. Заміряно на живому
+# оголошенні 2026-10-07: створено 21:53:11, перше підняття 21:56:43 — 3.5 хв.
+# Двох хвилин, які тут стояли спершу, не вистачало, і справді нове оголошення
+# підписувалось як «піднято 17 год тому · створено 17 год тому».
+SAME_PUBLICATION_SECS = 10 * 60
 # Telegram: ~30 повідомлень/сек загалом, але не більше одного на секунду в
 # той самий чат. Константа, а не літерал у циклі, щоб тести не спали.
 SEND_PAUSE = 1.2  # запобіжник від флуду, якщо пошук раптом віддав сотні збігів
@@ -247,10 +254,82 @@ def format_event(kind: str, watch_name: str, ad, old_price: float | None = None,
     if meta:
         bits.append("📍 " + esc(" · ".join(meta)))
 
+    age = format_age(ad)
+    if age:
+        bits.append(age)
+
     line = format_cheapest(cheapest, ad)
     if line:
         bits.append(line)
     return "\n".join(bits)
+
+
+def _parse_ts(value: Any) -> datetime | None:
+    """ISO-час OLX (`2026-10-06T21:53:11+03:00`) → datetime, або None.
+
+    Не кидає: зламаний рядок дати не вартий того, щоб сповіщення про знахідку
+    не пішло взагалі.
+    """
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return None
+    return dt if dt.tzinfo else dt.astimezone()
+
+
+def _ago(dt: datetime, *, now: datetime | None = None) -> str:
+    """«7 хв тому» / «3 год тому» / «14.03.2024».
+
+    Хвилини — лише поки вони щось означають: «створено 43 200 хв тому» не
+    каже нічого, тому після доби переходимо на дату.
+    """
+    now = now or datetime.now(dt.tzinfo or timezone.utc)
+    secs = (now - dt).total_seconds()
+    if secs < 60:
+        # Від'ємне теж сюди: годинник на боці OLX буває трохи попереду.
+        return "щойно"
+    mins = secs / 60
+    if mins < 60:
+        return f"{int(mins)} хв тому"
+    if mins < 60 * 24:
+        return f"{int(mins // 60)} год тому"
+    return dt.strftime("%d.%m.%Y")
+
+
+def format_age(ad, *, now: datetime | None = None) -> str:
+    """Рядок «коли це з'явилось», або порожній, якщо дат немає.
+
+    Навіщо дві дати, а не одна. OLX сортує видачу за ЧАСОМ ПІДНЯТТЯ, і саме
+    воно відповідає на питання «чи я перший». А `created_time` — це дата
+    першого створення: у видачі трапляються оголошення 2016 року, підняті
+    сьогодні (див. `claude/olx-search-api.md`, пастка 4). Показувати лише
+    «створено 10 років тому» — правда, яка збиває з пантелику; показувати
+    лише підняття — втратити те, що лот висить давно і ніхто його не бере.
+
+    Тому: збігаються (хвилина-друга) — оголошення справді нове, один рядок.
+    Ні — пишемо підняття, а створення поруч.
+
+    Зайвого запиту це не коштує: обидва поля приходять разом із видачею
+    (`created_time`/`last_refresh_time` у JSON-пошуку,
+    `createdTime`/`lastRefreshTime` у HTML).
+    """
+    created = _parse_ts(getattr(ad, "created_time", None))
+    refreshed = _parse_ts(getattr(ad, "refreshed_time", None))
+    if created is None and refreshed is None:
+        return ""
+    if created is None:
+        return f"🕒 піднято {_ago(refreshed, now=now)}"
+    if refreshed is None or abs((refreshed - created).total_seconds()) <= SAME_PUBLICATION_SECS:
+        return f"🕒 створено {_ago(created, now=now)}"
+    was, made = _ago(refreshed, now=now), _ago(created, now=now)
+    # Різні позначки часу, однакові на вигляд («17 год тому · 17 год тому») —
+    # рядок ні про що. Таке буває на межі одиниць, тож звіряємо вже готовий
+    # текст, а не самі дати.
+    if was == made:
+        return f"🕒 створено {made}"
+    return f"🕒 піднято {was} · створено {made}"
 
 
 def cheap_is_near(cheapest: dict | None, ad) -> bool:

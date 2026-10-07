@@ -36,7 +36,7 @@ STATE_VERSION = storage.STATE_VERSION
 REQUIRED_API = {
     "notify": ["build_channels", "dispatch", "format_event", "format_test",
                "format_heartbeat", "format_watch_error", "format_cheapest",
-               "format_loop_alarm", "format_loop_ok",
+               "format_loop_alarm", "format_loop_ok", "format_age",
                "poll_marks", "confirm_mark", "Message"],
     "olx": ["build_session", "fetch_watch", "matches", "price_ok", "ad_state",
             "fetch_description"],

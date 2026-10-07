@@ -145,6 +145,7 @@ def _normalize(a: dict[str, Any]) -> Ad:
         condition=a.get("itemCondition"),
         city=(a.get("location") or {}).get("cityName"),
         created_time=a.get("createdTime"),
+        refreshed_time=a.get("lastRefreshTime"),
         photo=(a.get("photos") or [None])[0],
         # OLX тримає точні збіги в listing.ads (searchReason: organic|promoted),
         # а "схоже на ваш запит" — в окремому expansionListing, який ми не читаємо.
@@ -412,6 +413,7 @@ def _normalize_api(raw: dict[str, Any], *, promoted: bool, organic: bool,
         condition=_api_param(raw, "state"),
         city=((raw.get("location") or {}).get("city") or {}).get("name"),
         created_time=raw.get("created_time"),
+        refreshed_time=raw.get("last_refresh_time"),
         photo=photo,
         # У HTML «схоже на ваш запит» лежить в окремому expansionListing, якого
         # ми не читаємо. В API той самий поділ дає metadata.source: усе, що не

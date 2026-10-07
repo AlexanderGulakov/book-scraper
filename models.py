@@ -19,6 +19,11 @@ class Ad:
     condition: str | None = None
     city: str | None = None
     created_time: str | None = None
+    # Час останнього підняття. Саме за ним OLX сортує «від найновіших» —
+    # `created_time` у видачі буває й 2016 роком (оголошення створили давно,
+    # а продають знову). Тримаємо обидва: різниця між ними і відрізняє справді
+    # нове оголошення від піднятого старого.
+    refreshed_time: str | None = None
     photo: str | None = None
     similar: bool = False
     reason: str | None = None
