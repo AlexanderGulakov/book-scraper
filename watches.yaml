@@ -266,29 +266,49 @@ books:
     notify_max: 300       # піднято 2026-10-02
 
   # ── Роберт Ґалбрейт (Корморан Страйк) ─────────────────────────────────────
+  # Список watch'ів спільний на всі книжки циклу (як &hp_watches у Поттера):
+  # інакше при кожному новому запиті довелось би правити дванадцять позицій,
+  # і книжка, яку новий watch приніс, рахувалась би не тією книжкою.
   - name: "Ґалбрейт: Кувала зозуля"
-    watch: ["Роберт Ґалбрейт (Страйк)", "Букфлі"]
+    watch: &strike_watches
+      - "Роберт Ґалбрейт (Страйк)"
+      - "Ґалбрейт: гелбрейт"
+      - "Ґалбрейт: galbraith"
+      - "Ґалбрейт: Корморан Страйк"
+      - "Ґалбрейт: Кувала зозуля"
+      - "Ґалбрейт: Шовкопряд"
+      - "Ґалбрейт: Кар'єра лиходія"
+      - "Ґалбрейт: На службі зла"
+      - "Ґалбрейт: Убивчий білий"
+      - "Ґалбрейт: Бентежна кров"
+      - "Ґалбрейт: Чорнильно-чорне серце"
+      - "Ґалбрейт: Стрімка могила"
+      - "Ґалбрейт: Людина з клеймом"
+      - "Букфлі"
     any: ["кувала зозуля", "кличе зозуля", "cuckoo"]
   - name: "Ґалбрейт: Шовкопряд"
-    watch: ["Роберт Ґалбрейт (Страйк)", "Букфлі"]
-    all: ["шовкопряд"]
+    watch: *strike_watches
+    any: ["шовкопряд", "silkworm"]
+  - name: "Ґалбрейт: Кар'єра лиходія"
+    watch: *strike_watches
+    any: ["лиходія", "career of evil"]
   - name: "Ґалбрейт: На службі зла"
-    watch: ["Роберт Ґалбрейт (Страйк)", "Букфлі"]
+    watch: *strike_watches
     all: ["на службі зла"]
   - name: "Ґалбрейт: Убивчий білий"
-    watch: ["Роберт Ґалбрейт (Страйк)", "Букфлі"]
-    any: ["убивчий біл", "lethal white"]
+    watch: *strike_watches
+    any: ["убивчий біл", "убивчо біл", "lethal white"]
   - name: "Ґалбрейт: Бентежна кров"
-    watch: ["Роберт Ґалбрейт (Страйк)", "Букфлі"]
+    watch: *strike_watches
     all: ["бентежна кров"]
   - name: "Ґалбрейт: Чорнильно-чорне серце"
-    watch: ["Роберт Ґалбрейт (Страйк)", "Букфлі"]
-    all: ["чорнильно"]
+    watch: *strike_watches
+    any: ["чорнильно", "ink black"]
   - name: "Ґалбрейт: Стрімка могила"
-    watch: ["Роберт Ґалбрейт (Страйк)", "Букфлі"]
-    all: ["стрімка могил"]
+    watch: *strike_watches
+    any: ["стрімка могил", "running grave"]
   - name: "Ґалбрейт: Людина з клеймом"
-    watch: ["Роберт Ґалбрейт (Страйк)", "Букфлі"]
+    watch: *strike_watches
     all: ["людина з клеймом"]
 
   # ── Стівен Кінг: лише ті книжки, у яких є власні пороги ──────────────────
@@ -829,14 +849,31 @@ watches:
     include_keywords: ["вежа ластівки", "вежа ласт", "tower of the swallow"]
 
   # Роберт Ґалбрейт (Дж. К. Ролінґ), цикл про Корморана Страйка.
-  # Один запит вистачає: OLX сам зводить «галбрейт / ґалбрейт / гелбрейт /
-  # гэлбрейт» в одну видачу (перевірено — всі чотири дають той самий набір).
+  #
+  # ⚠ Тут стояв коментар «один запит вистачає: OLX сам зводить галбрейт /
+  # ґалбрейт / гелбрейт / гэлбрейт в одну видачу». Переміряно 2026-10-08 на
+  # живій видачі — це НЕПРАВДА, і коштувало воно двох третин ринку:
+  #
+  #   запит        знайдено   з них немає у q-галбрейт
+  #   галбрейт        38        —
+  #   ґалбрейт        40         2      (практично той самий набір)
+  #   гелбрейт        47        42      ← окремий ринок
+  #   ґелбрейт        43         0 понад «гелбрейт» (строга підмножина)
+  #   гэлбрейт        50        50      (російські видання — їх ріже мова)
+  #   galbraith       10         6
+  #
+  # Тому: «галбрейт» лишається, додано «гелбрейт» і «galbraith».
+  # «ґалбрейт» і «ґелбрейт» не додаємо — вони нічого не приносять понад ці два.
+  # «гэлбрейт» не додаємо свідомо: 93 оголошення, майже всі російські, і всі
+  # вони однаково гинуть на мовному фільтрі. Якщо колись знадобиться статистика
+  # російського ринку — це окреме рішення, не побічний ефект запиту.
+  #
   # include лишається, бо у видачу підмішуються чужі книжки.
   - name: "Роберт Ґалбрейт (Страйк)"
     url: "https://www.olx.ua/uk/hobbi-otdyh-i-sport/knigi-zhurnaly/q-%D0%B3%D0%B0%D0%BB%D0%B1%D1%80%D0%B5%D0%B9%D1%82/?currency=UAH&search%5Border%5D=created_at%3Adesc"
-    max_price: 2000
-    notify_max_price: 2000
-    include_keywords:
+    max_price: &strike_max 2000
+    notify_max_price: *strike_max
+    include_keywords: &strike_inc
       # прізвище в усіх написаннях, які трапляються в оголошеннях
       - "галбрейт"
       - "ґалбрейт"
@@ -856,6 +893,7 @@ watches:
       - "career of evil"
       - "на службі зла"
       - "убивчий білий"
+      - "убивчо білий"       # трапляється й так
       - "lethal white"
       - "бентежна кров"
       - "troubled blood"
@@ -864,7 +902,114 @@ watches:
       - "людина з клеймом"
       - "running grave"
       - "стрімка могила"
-    exclude_keywords: ["венздей"]   # Бри Галбрейт — інша авторка, дитяча серія
+    exclude_keywords: &strike_noise ["венздей"]   # Бри Галбрейт — інша авторка, дитяча серія
+
+  # Друге написання прізвища. Саме воно, а не «галбрейт», стоїть у більшості
+  # оголошень КСД — 42 з 47 його результатів базовий запит не бачить узагалі.
+  - name: "Ґалбрейт: гелбрейт"
+    url: "https://www.olx.ua/uk/hobbi-otdyh-i-sport/knigi-zhurnaly/q-%D0%B3%D0%B5%D0%BB%D0%B1%D1%80%D0%B5%D0%B9%D1%82/?currency=UAH&search%5Border%5D=created_at%3Adesc"
+    max_price: *strike_max
+    notify_max_price: *strike_max
+    include_keywords: *strike_inc
+    exclude_keywords: *strike_noise
+
+  - name: "Ґалбрейт: galbraith"
+    url: "https://www.olx.ua/uk/hobbi-otdyh-i-sport/knigi-zhurnaly/q-galbraith/?currency=UAH&search%5Border%5D=created_at%3Adesc"
+    max_price: *strike_max
+    notify_max_price: *strike_max
+    include_keywords: *strike_inc
+    exclude_keywords: *strike_noise
+
+  # Ім'я героя замість прізвища автора: 34 оголошення, усі по темі, 22 з них
+  # не бачить жоден із запитів за прізвищем.
+  - name: "Ґалбрейт: Корморан Страйк"
+    url: "https://www.olx.ua/uk/hobbi-otdyh-i-sport/knigi-zhurnaly/q-%D0%BA%D0%BE%D1%80%D0%BC%D0%BE%D1%80%D0%B0%D0%BD-%D1%81%D1%82%D1%80%D0%B0%D0%B9%D0%BA/?currency=UAH&search%5Border%5D=created_at%3Adesc"
+    max_price: *strike_max
+    notify_max_price: *strike_max
+    include_keywords: *strike_inc
+    exclude_keywords: *strike_noise
+
+  # ── Ґалбрейт за назвами книжок ────────────────────────────────────────────
+  # Привід (2026-10-08): «Детективний роман Кувала зозуля» за 400 грн. Правила
+  # приймали його без питань — у каталозі є і позиція, і ключове слово, — але
+  # в оголошенні немає ані автора, ані серії, тож у видачу q-галбрейт воно не
+  # потрапляло, і фільтрувати не було чого. П'ятий випадок уроку з
+  # claude/search-coverage.md: питати треба за тим, що в оголошенні написане
+  # обов'язково, а назва книжки — єдине таке.
+  #
+  # Скільки оголошень по темі додає кожен запит понад q-галбрейт (заміряно):
+  #   на службі зла +17 · чорнильно-чорне серце +6 · шовкопряд +6 ·
+  #   кувала зозуля +4 · кар'єра лиходія +2 · убивчий білий +2 ·
+  #   людина з клеймом +1 · бентежна кров +1 · стрімка могила 0
+  #
+  # «Стрімка могила» лишена попри нуль: запит коштує пів секунди, а книжка
+  # свіжа — оголошення без автора тут питання часу.
+  - name: "Ґалбрейт: Кувала зозуля"
+    url: "https://www.olx.ua/uk/hobbi-otdyh-i-sport/knigi-zhurnaly/q-%D0%BA%D1%83%D0%B2%D0%B0%D0%BB%D0%B0-%D0%B7%D0%BE%D0%B7%D1%83%D0%BB%D1%8F/?currency=UAH&search%5Border%5D=created_at%3Adesc"
+    max_price: *strike_max
+    notify_max_price: *strike_max
+    include_keywords: *strike_inc
+    exclude_keywords: *strike_noise
+
+  - name: "Ґалбрейт: Шовкопряд"
+    url: "https://www.olx.ua/uk/hobbi-otdyh-i-sport/knigi-zhurnaly/q-%D1%88%D0%BE%D0%B2%D0%BA%D0%BE%D0%BF%D1%80%D1%8F%D0%B4/?currency=UAH&search%5Border%5D=created_at%3Adesc"
+    max_price: *strike_max
+    notify_max_price: *strike_max
+    include_keywords: *strike_inc
+    exclude_keywords: *strike_noise
+
+  - name: "Ґалбрейт: Кар'єра лиходія"
+    url: "https://www.olx.ua/uk/hobbi-otdyh-i-sport/knigi-zhurnaly/q-%D0%BA%D0%B0%D1%80%27%D1%94%D1%80%D0%B0-%D0%BB%D0%B8%D1%85%D0%BE%D0%B4%D1%96%D1%8F/?currency=UAH&search%5Border%5D=created_at%3Adesc"
+    max_price: *strike_max
+    notify_max_price: *strike_max
+    include_keywords: *strike_inc
+    exclude_keywords: *strike_noise
+
+  # 50 оголошень з 50 можливих — видача впирається в стелю API, тому дві
+  # сторінки. «На службі зла» — ще й ходовий зворот поза Ґалбрейтом, тож по
+  # темі тут приблизно третина; решту знімає include.
+  - name: "Ґалбрейт: На службі зла"
+    url: "https://www.olx.ua/uk/hobbi-otdyh-i-sport/knigi-zhurnaly/q-%D0%BD%D0%B0-%D1%81%D0%BB%D1%83%D0%B6%D0%B1%D1%96-%D0%B7%D0%BB%D0%B0/?currency=UAH&search%5Border%5D=created_at%3Adesc"
+    pages: 2
+    max_price: *strike_max
+    notify_max_price: *strike_max
+    include_keywords: *strike_inc
+    exclude_keywords: *strike_noise
+
+  - name: "Ґалбрейт: Убивчий білий"
+    url: "https://www.olx.ua/uk/hobbi-otdyh-i-sport/knigi-zhurnaly/q-%D1%83%D0%B1%D0%B8%D0%B2%D1%87%D0%B8%D0%B9-%D0%B1%D1%96%D0%BB%D0%B8%D0%B9/?currency=UAH&search%5Border%5D=created_at%3Adesc"
+    max_price: *strike_max
+    notify_max_price: *strike_max
+    include_keywords: *strike_inc
+    exclude_keywords: *strike_noise
+
+  - name: "Ґалбрейт: Бентежна кров"
+    url: "https://www.olx.ua/uk/hobbi-otdyh-i-sport/knigi-zhurnaly/q-%D0%B1%D0%B5%D0%BD%D1%82%D0%B5%D0%B6%D0%BD%D0%B0-%D0%BA%D1%80%D0%BE%D0%B2/?currency=UAH&search%5Border%5D=created_at%3Adesc"
+    max_price: *strike_max
+    notify_max_price: *strike_max
+    include_keywords: *strike_inc
+    exclude_keywords: *strike_noise
+
+  - name: "Ґалбрейт: Чорнильно-чорне серце"
+    url: "https://www.olx.ua/uk/hobbi-otdyh-i-sport/knigi-zhurnaly/q-%D1%87%D0%BE%D1%80%D0%BD%D0%B8%D0%BB%D1%8C%D0%BD%D0%BE-%D1%87%D0%BE%D1%80%D0%BD%D0%B5-%D1%81%D0%B5%D1%80%D1%86%D0%B5/?currency=UAH&search%5Border%5D=created_at%3Adesc"
+    max_price: *strike_max
+    notify_max_price: *strike_max
+    include_keywords: *strike_inc
+    exclude_keywords: *strike_noise
+
+  - name: "Ґалбрейт: Стрімка могила"
+    url: "https://www.olx.ua/uk/hobbi-otdyh-i-sport/knigi-zhurnaly/q-%D1%81%D1%82%D1%80%D1%96%D0%BC%D0%BA%D0%B0-%D0%BC%D0%BE%D0%B3%D0%B8%D0%BB%D0%B0/?currency=UAH&search%5Border%5D=created_at%3Adesc"
+    max_price: *strike_max
+    notify_max_price: *strike_max
+    include_keywords: *strike_inc
+    exclude_keywords: *strike_noise
+
+  - name: "Ґалбрейт: Людина з клеймом"
+    url: "https://www.olx.ua/uk/hobbi-otdyh-i-sport/knigi-zhurnaly/q-%D0%BB%D1%8E%D0%B4%D0%B8%D0%BD%D0%B0-%D0%B7-%D0%BA%D0%BB%D0%B5%D0%B9%D0%BC%D0%BE%D0%BC/?currency=UAH&search%5Border%5D=created_at%3Adesc"
+    max_price: *strike_max
+    notify_max_price: *strike_max
+    include_keywords: *strike_inc
+    exclude_keywords: *strike_noise
 
   # 27 з 40 було не по темі: довідник механізатора, залізобетонні конструкції
   # і норії НК-50 (бо «бункер» — ще й деталь зернової техніки).
@@ -1111,15 +1256,25 @@ watches:
   # Пошук за словом від порядку видачі не залежить узагалі: книжка знайдеться
   # хоч у свіжому зрізі, хоч у вчорашньому.
   #
-  # Ціна — 11 запитів за прогін замість одного, тому перевіряємо раз на 30 хв,
-  # а не щоразу разом з OLX: ~530 запитів і ~55 МБ на добу. Для книжок, які
-  # висять тижнями, півгодини затримки нічого не міняють.
+  # Ціна — 11 запитів за прогін замість одного, тому перевіряємо за власним
+  # розкладом, а не щоразу разом з OLX.
   # Між запитами пауза 2.5-4 с, паралельно нічого не шлеться.
-  # Якщо сайт колись почне віддавати 403 — підняти до 60.
+  #
+  # 2026-10-08: з 30 хв зменшено до 12. Що це коштує на добу:
+  #   30 хв → 48 прогонів, ~530 запитів, ~55 МБ
+  #   12 хв → 120 прогонів, ~1320 запитів, ~135 МБ
+  # Тобто навантаження на сайт у 2.5 раза більше. Анти-бот захисту в Букфлі
+  # немає, але якщо колись почнуть прилітати 403 — перше, що треба відкотити,
+  # це саме цей рядок (назад до 30, у край до 60).
+  #
+  # ⚠ Значення мусить збігатися з <Interval> у bookflea-task.xml: Планувальник
+  # вирішує, КОЛИ запустити процес, а interval_minutes — чи робити роботу,
+  # коли той уже запустився. Якщо тут поставити більше, ніж у Планувальника,
+  # зайві прогони вийдуть у холосту («ще не час»).
   - name: "Букфлі"
     source: bookflea
     mode: search
-    interval_minutes: 30
+    interval_minutes: 12
     page_size: 24
     use_default_excludes: false   # мерч-фільтр з defaults тут зайвий: це книгарня
     keywords:

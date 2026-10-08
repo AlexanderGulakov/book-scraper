@@ -1292,6 +1292,7 @@ def explain_ad(cfg: dict[str, Any], url: str) -> int:
     log.info("")
 
     hit = False
+    accepted: list[tuple[str, dict[str, Any]]] = []
     for idx, w in enumerate(cfg["watches"]):
         if str(w.get("source", "olx")).lower() != "olx":
             continue
@@ -1309,6 +1310,8 @@ def explain_ad(cfg: dict[str, Any], url: str) -> int:
                            skip_promoted=bool(opt.get("skip_promoted", False))):
             continue          # цей watch його просто не про це — мовчимо
         hit = True
+        if w.get("url"):
+            accepted.append((name, w))
         entry = analytics.book_entry(ad.title, name, catalog)
         d = rules.decide(title=ad.title, price=ad.price, watch=opt, entry=entry,
                          description=desc, include=opt.get("include_keywords", []) or [],
@@ -1318,18 +1321,68 @@ def explain_ad(cfg: dict[str, Any], url: str) -> int:
         log.info("%-34s книжка: %s%s", "", entry["name"] if entry else "(за назвою watch\'а)",
                  "" if d.analytics else " · поза статистикою")
 
-    log.info("")
-    log.info("Тут показано лише рішення ПРАВИЛ. Watch може приймати оголошення "
-             "за фільтрами й водночас ніколи його не бачити — якщо воно не "
-             "потрапляє у видачу його запиту.")
-
     if not hit:
+        log.info("")
         log.info("Жоден watch не бере це оголошення: воно не проходить фільтр "
                  "заголовка (include/exclude) в усіх пошуках.")
         log.info("Але це ще не все: оголошення може не потрапляти й у саму "
                  "видачу пошуку — тоді скрапер його просто не бачить. "
                  "Перевірте, чи знаходить його ваш запит на сайті.")
+        return 0
+
+    explain_coverage(session, defaults, accepted, ad.id)
     return 0
+
+
+def explain_coverage(session: Any, defaults: dict[str, Any],
+                     accepted: list[tuple[str, dict[str, Any]]],
+                     ad_id: str, *, pause: float = 0.6) -> None:
+    """Чи бачить оголошення ХОЧ ОДИН watch, який приймає його за фільтрами.
+
+    Навіщо. Рішення правил — лише половина відповіді. Watch може приймати
+    оголошення й ніколи його не бачити, бо воно не потрапляє у видачу запиту:
+    у цьому проєкті так було вже п'ять разів поспіль, і щоразу ми доходили до
+    причини вручну, відкриваючи запит на сайті (`claude/search-coverage.md`).
+    Тепер це робить команда.
+
+    Чому так пізно й окремою функцією: тут ми вперше ходимо мережею по
+    видачу — стільки запитів, скільки watch'ів прийняли оголошення. Рішення
+    правил уже надруковані вище, тож навіть якщо все це впаде, відповідь
+    на екрані лишається.
+    """
+    log.info("")
+    log.info("Чи є оголошення у видачі цих watch'ів (%s запит(ів) до OLX):",
+             len(accepted))
+    seen_anywhere = False
+    for name, w in accepted:
+        opt = {**defaults, **w}
+        pages = int(opt.get("pages", 1))
+        try:
+            try:
+                ads = olx.fetch_watch_api(session, w["url"], pages=pages, pause=pause)
+            except olx.OlxError:
+                ads = olx.fetch_watch(session, w["url"], pages=pages, pause=pause)
+        except Exception as exc:  # noqa: BLE001
+            log.info("%-34s ⚠ не вдалось перевірити: %s", name, exc)
+            continue
+        if any(str(a.id) == str(ad_id) for a in ads):
+            seen_anywhere = True
+            log.info("%-34s ✓ є у видачі (%s оголошень)", name, len(ads))
+        else:
+            log.info("%-34s ✗ ПРИЙМАЮ, АЛЕ У ВИДАЧІ НЕМАЄ (%s оголошень)",
+                     name, len(ads))
+        time.sleep(pause)
+
+    log.info("")
+    if seen_anywhere:
+        log.info("Принаймні один watch це оголошення бачить — значить причина "
+                 "в правилах вище, а не в покритті пошуку.")
+    else:
+        log.info("⚠ Жоден watch, який приймає це оголошення за фільтрами, не "
+                 "бачить його у своїй видачі. Це діра в покритті, а не у "
+                 "фільтрах: потрібен запит за тим, що в оголошенні написане "
+                 "обов'язково (найчастіше — назва книжки). "
+                 "Див. claude/search-coverage.md.")
 
 
 def one_pass(args: Any, cfg: dict[str, Any], store: Any) -> int:
@@ -1551,7 +1604,8 @@ def main() -> int:
                     help="лише забрати натискання кнопок з Telegram і вийти — "
                          "без жодного запиту в OLX, секунда роботи")
     ap.add_argument("--explain", metavar="URL",
-                    help="чому конкретне оголошення прийшло або не прийшло")
+                    help="чому конкретне оголошення прийшло або не прийшло "
+                         "(рішення правил + перевірка, чи є воно у видачі)")
     ap.add_argument("--find-chat", action="store_true",
                     help="показати chat_id чатів, де бот нещодавно бачив повідомлення")
     # --- Цикл у межах одного процесу ----------------------------------------

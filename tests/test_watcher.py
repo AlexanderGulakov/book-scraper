@@ -710,6 +710,8 @@ def test_task_template_is_valid_and_parametrised():
     """Шаблон завдання має бути валідним XML і містити рівно один __DIR__."""
     import xml.etree.ElementTree as ET
 
+    import yaml
+
     root = Path(__file__).resolve().parent.parent
     raw = (root / "bookflea-task.xml").read_text(encoding="utf-8")
     assert raw.count("__DIR__") == 1, "плейсхолдер має бути рівно один"
@@ -717,7 +719,16 @@ def test_task_template_is_valid_and_parametrised():
     tree = ET.fromstring(raw.replace("__DIR__", r"C:\somewhere\olx-watcher"))
     ns = {"t": "http://schemas.microsoft.com/windows/2004/02/mit/task"}
     assert tree.find(".//t:Exec/t:WorkingDirectory", ns).text.endswith("olx-watcher")
-    assert tree.find(".//t:Interval", ns).text == "PT30M"
+    # Інтервал не зашиваємо числом: тут він уже раз розійшовся з XML (тест
+    # вимагав PT30M, у файлі стояло PT12M) і червонів, доки на нього не
+    # подивились. Правда — у `watches.yaml`, бо саме з нею XML мусить
+    # збігатися: Планувальник вирішує, КОЛИ будити процес, а `interval_minutes`
+    # — чи вже час працювати. Більший XML-інтервал означає пропущені прогони,
+    # менший — зайві запуски.
+    minutes = next(w["interval_minutes"] for w in yaml.safe_load(
+        (root / "watches.yaml").read_text(encoding="utf-8"))["watches"]
+        if w.get("interval_minutes") is not None)
+    assert tree.find(".//t:Interval", ns).text == f"PT{minutes}M"
     # ноутбук: на батареї не стежимо, але пропущене надолужуємо
     assert tree.find(".//t:DisallowStartIfOnBatteries", ns).text == "true"
     assert tree.find(".//t:StartWhenAvailable", ns).text == "true"

@@ -34,7 +34,7 @@ rem                   walk the WHOLE state, not just this run's watches. Until
 rem                   2026-09-29 both runners built them, and when the two
 rem                   overlapped the same report arrived twice (16:04 and
 rem                   16:05). GitHub Actions owns them now; this run only
-rem                   scrapes Bookflea. Saves ~45s here every 30 minutes too.
+rem                   scrapes Bookflea. Saves ~45s on every run too.
 rem --storage mongo : state lives in MongoDB Atlas now, shared with the cloud.
 rem                   The old separate state.local.json is gone: with
 rem                   document-level writes both writers touch different

@@ -15,6 +15,8 @@
 
 from __future__ import annotations
 
+import os
+import re
 import subprocess
 import sys
 import time
@@ -87,6 +89,13 @@ def create_task() -> bool:
         return False
 
     xml = TEMPLATE.read_text(encoding="utf-8").replace("__DIR__", str(HERE))
+    # Шаблон працює під S4U («незалежно від входу в систему»), а для цього
+    # потрібен явний UserId — інакше schtasks бере принципала з XML як є і
+    # відмовляє. Беремо поточного користувача: DOMAIN\user, а для машини без
+    # домену USERDOMAIN — це просто ім'я комп'ютера, і це теж правильно.
+    domain = os.environ.get("USERDOMAIN", "")
+    user = os.environ.get("USERNAME", "")
+    xml = xml.replace("__USER__", f"{domain}\\{user}" if domain else user)
     # schtasks /XML найнадійніше читає UTF-16LE з BOM — саме так Планувальник
     # і сам експортує завдання. Пролог мусить збігатися з реальним кодуванням
     # файлу, інакше парсер спіткнеться об розбіжність.
@@ -94,21 +103,54 @@ def create_task() -> bool:
     tmp = HERE / "logs" / "_task.xml"
     tmp.parent.mkdir(exist_ok=True)
     tmp.write_text(xml, encoding="utf-16")
-
     try:
-        done = subprocess.run(
-            ["schtasks", "/Create", "/TN", TASK, "/XML", str(tmp), "/F"],
-            capture_output=True, text=True, errors="replace",
-        )
+        return try_register(tmp, xml)
     finally:
         tmp.unlink(missing_ok=True)
 
-    if done.returncode != 0:
-        say(f"    [X] schtasks відмовив: {(done.stderr or done.stdout).strip()}")
-        return False
 
-    say("    [OK] Створено. На батареї не запускатиметься — економія.")
+def try_register(tmp: Path, xml: str) -> bool:
+    """Спершу без вікна (S4U), а якщо прав бракує — по-старому."""
+    done = register(tmp)
+    if done.returncode != 0:
+        # Зареєструвати завдання, яке працює БЕЗ інтерактивного сеансу (S4U),
+        # Windows дозволяє лише з підвищеними правами — звідси «Access is
+        # denied». Сам прогін потім іде зі звичайними правами, адміністратор
+        # потрібен рівно один раз, на момент реєстрації.
+        say(f"    [!] Не вдалось зареєструвати без вікна: "
+            f"{(done.stderr or done.stdout).strip()}")
+        say("        Так буває без прав адміністратора.")
+        say("        Варіант А: закрийте це вікно й запустіть"
+            " bookflea-install.bat правою кнопкою -> 'Запуск від імені"
+            " адміністратора'.")
+        say("        Варіант Б (зараз): лишити як було, з видимим вікном.")
+        say("        Роблю Б, щоб ви не лишились без завдання...")
+        tmp.write_text(
+            xml.replace("<LogonType>S4U</LogonType>",
+                        "<LogonType>InteractiveToken</LogonType>"),
+            encoding="utf-16",
+        )
+        done = register(tmp)
+        if done.returncode != 0:
+            say(f"    [X] schtasks відмовив і тут: "
+                f"{(done.stderr or done.stdout).strip()}")
+            return False
+        say("    [OK] Створено у старому режимі — вікно буде видимим.")
+        return True
+
+    say("    [OK] Створено. Без вікна; на батареї не запускатиметься — економія.")
     return True
+
+
+def register(tmp: Path) -> subprocess.CompletedProcess:
+    """Віддає готовий XML у schtasks. Окремо — щоб можна було повторити."""
+    try:
+        return subprocess.run(
+            ["schtasks", "/Create", "/TN", TASK, "/XML", str(tmp), "/F"],
+            capture_output=True, text=True, errors="replace",
+        )
+    except OSError as err:  # schtasks немає в PATH — буває на урізаних збірках
+        return subprocess.CompletedProcess([], 1, "", str(err))
 
 
 def verify_via_scheduler() -> bool:
@@ -132,11 +174,21 @@ def verify_via_scheduler() -> bool:
     return False
 
 
+def schedule_minutes() -> str:
+    """Інтервал беремо з XML, щоб напис на екрані не розходився з правдою."""
+    try:
+        found = re.search(r"<Interval>PT(\d+)M</Interval>",
+                          TEMPLATE.read_text(encoding="utf-8"))
+    except OSError:
+        return "?"
+    return found.group(1) if found else "?"
+
+
 def main() -> int:
     say("=" * 60)
     say(f" Завдання : {TASK}")
     say(f" Запускає : {RUNNER}")
-    say(" Розклад  : кожні 30 хвилин")
+    say(f" Розклад  : кожні {schedule_minutes()} хв")
     say("=" * 60)
     say()
 
@@ -158,7 +210,8 @@ def main() -> int:
         return 1
 
     say()
-    say("[OK] Готово. Далі — кожні 30 хвилин, поки ноутбук у розетці.")
+    say(f"[OK] Готово. Далі — кожні {schedule_minutes()} хв,"
+        " поки ноутбук у розетці.")
     say(f"     Лог: {LOG}")
     return 0
 

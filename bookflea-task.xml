@@ -16,21 +16,36 @@
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo>
     <Author>bookflea-install.bat</Author>
-    <Description>Bookflea watcher: checks bookflea.co every 30 minutes and posts finds to Telegram.</Description>
+    <Description>Bookflea watcher: checks bookflea.co every 12 minutes and posts finds to Telegram.</Description>
   </RegistrationInfo>
   <Triggers>
     <TimeTrigger>
       <StartBoundary>2026-01-01T00:00:00</StartBoundary>
       <Enabled>true</Enabled>
       <Repetition>
-        <Interval>PT30M</Interval>
+        <!-- Мусить збігатися з interval_minutes у watches.yaml (2026-10-08:
+             12 хв). Планувальник вирішує, коли запустити процес; скрипт за
+             своїм interval_minutes вирішує, чи вже час працювати. -->
+        <Interval>PT12M</Interval>
         <StopAtDurationEnd>false</StopAtDurationEnd>
       </Repetition>
     </TimeTrigger>
   </Triggers>
   <Principals>
+    <!--
+      S4U, а не InteractiveToken — це і є «виконувати, незалежно від того,
+      ввійшов користувач у систему чи ні». Відмінність лише одна, але саме
+      вона тут потрібна: InteractiveToken запускає процес у сеансі
+      користувача, тому cmd.exe малює на екрані чорне вікно консолі. S4U
+      виконує те саме від імені того самого користувача (його змінні
+      середовища, його .env, його права на теку), але без інтерактивного
+      робочого стола — вікна не видно взагалі.
+      Пароль не потрібен: S4U — це «не зберігати пароль».
+      Плейсхолдер __USER__ підставляє install_task.py.
+    -->
     <Principal id="Author">
-      <LogonType>InteractiveToken</LogonType>
+      <UserId>__USER__</UserId>
+      <LogonType>S4U</LogonType>
       <RunLevel>LeastPrivilege</RunLevel>
     </Principal>
   </Principals>
@@ -52,8 +67,11 @@
       <RestartOnIdle>false</RestartOnIdle>
     </IdleSettings>
 
-    <!-- Прогін триває ~1 хв; 15 — це запобіжник від зависань, не норма -->
-    <ExecutionTimeLimit>PT15M</ExecutionTimeLimit>
+    <!-- Прогін триває ~1 хв; це запобіжник від зависань, не норма.
+         Було 15 хв, але з інтервалом 12 хв зависла копія разом з
+         MultipleInstancesPolicy=IgnoreNew з'їдала б наступний слот, тож
+         ліміт має бути меншим за інтервал. -->
+    <ExecutionTimeLimit>PT10M</ExecutionTimeLimit>
 
     <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
     <AllowStartOnDemand>true</AllowStartOnDemand>

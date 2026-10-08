@@ -8,6 +8,7 @@
 Запуск:  python probe.py [url]
          python probe.py --rate     — скільки запитів поспіль OLX терпить
          python probe.py --freshness — наскільки свіжу видачу бачить ця адреса
+         python probe.py --batches 20 — коли індекс приймає нові оголошення
 """
 
 from __future__ import annotations
@@ -268,12 +269,144 @@ def freshness_probe() -> int:
         print(f"{name:<22} {len(ages):>10} {ages[0]/60:>9.1f} хв {mid/60:>7.1f} хв")
         time.sleep(1)
 
-    print("\n➜ Порівняйте «найсвіжіше» з тим, що в ту саму хвилину показує")
-    print("  домашній браузер. Різниця в хвилинах = ціна географії раннера.")
+    # Відбиток стрічки: id найсвіжіших оголошень. Саме його треба звіряти,
+    # а не агрегати.
+    #
+    # Чому агрегат не годиться. «Найсвіжіше» — це максимум по 49 оголошеннях,
+    # і він залежить не лише від затримки індексу, а й від того, скільки
+    # оголошень узагалі виклали за останні хвилини. Три заміри з ОДНІЄЇ
+    # домашньої адреси 2026-10-07 дали 7.8 / 5.4 / 10.3 хв за десять хвилин —
+    # розкид більший за ефект, який ми шукаємо. Пара «раннер проти дому» на
+    # таких числах не доводить нічого.
+    #
+    # А от списки id — пара по тих самих оголошеннях. Якщо в раннера немає
+    # оголошення, яке вдома вже видно, і його lr старший за час запиту —
+    # це вже не шум, а доказ.
+    try:
+        status, body = f.get(SEARCH_API_TMPL, timeout=30)
+        data = (json.loads(body) or {}).get("data") or []
+        rows = [(d.get("last_refresh_time"), d.get("id"))
+                for d in data if not ((d.get("promotion") or {}).get("top_ad"))]
+        rows.sort(reverse=True)
+        print("\nВідбиток стрічки — 10 найсвіжіших (звіряти списки, не цифри):")
+        for ts, ad_id in rows[:10]:
+            print(f"  {ts}  {ad_id}")
+    except Exception as exc:  # noqa: BLE001
+        print(f"\nВідбиток зняти не вдалось: {exc}")
+
+    print("\n➜ Зняти ОДНОЧАСНО тут і на раннері (режим `api`), тоді порівняти")
+    print("  списки id. Відсутнє в одного й наявне в іншого = доказ розбіжності;")
+    print("  різниця в хвилинах сама по собі — ще не доказ, розкид великий.")
+    return 0
+
+
+def batches_probe(minutes: float = 20.0) -> int:
+    """Коли саме індекс OLX приймає нові оголошення.
+
+    Привід (2026-10-07). Три заміри `--freshness` поспіль з однієї адреси
+    дали приріст +4.9 / +4.9 / +4.9 хв на всіх трьох джерелах за 4.9 хвилини,
+    що минули. Усі цифри виросли РІВНО на час очікування — тобто за ці п'ять
+    хвилин в індекс не потрапило нічого, і найсвіжіші оголошення просто
+    постаріли. Паралельний семплер із браузера це підтвердив: за 9.2 хвилини
+    опитування кожні 15 с була одна пачка (49 оголошень одразу, вік 6.4-10.3
+    хв), а до неї сторінка не ворухнулась 5.5 хвилини.
+
+    Тобто затримка індексу не випадкова, а пилкоподібна: після пачки —
+    мінімум, перед наступною — плюс цілий період. Середнє, яке ми міряли
+    раніше, — це просто середина пилки.
+
+    Навіщо знати період. Якщо він ~5 хв, то опитувати частіше за це
+    безглуздо за визначенням: ми смикаємо раз на хвилину те, що змінюється
+    раз на п'ять. І навпаки — якщо вдасться ловити момент пачки, решту часу
+    можна не турбувати OLX зовсім.
+
+    Міряти варто ввечері (20:00-22:00): саме тоді потік публікацій
+    найбільший, і саме тоді ми програємо покупцям.
+    """
+    import fetcher
+    from datetime import datetime, timezone
+
+    where_am_i()
+    f = fetcher.Fetcher()
+    deadline = time.time() + minutes * 60
+    seen: set = set()
+    last_batch = None
+    gaps: list[float] = []
+    first_ages: list[float] = []
+
+    print(f"Слухаю стрічку {minutes:.0f} хв, опитування кожні 15 с. Ctrl+C — зупинити.\n")
+    print(f"{'час':<10} {'нових':>6} {'найсвіжіше':>11} {'найстаріше':>11} {'від минулої':>12}")
+    print("-" * 56)
+    try:
+        while time.time() < deadline:
+            t0 = time.time()
+            try:
+                status, body = f.get(SEARCH_API_TMPL, timeout=30)
+                data = (json.loads(body) or {}).get("data") or []
+            except Exception as exc:  # noqa: BLE001
+                print(f"{time.strftime('%H:%M:%S')}  {type(exc).__name__}: {str(exc)[:30]}")
+                time.sleep(15)
+                continue
+            now = datetime.now(timezone.utc)
+            org = [d for d in data if not ((d.get("promotion") or {}).get("top_ad"))]
+            fresh = [d for d in org if d.get("id") not in seen]
+            warm = bool(seen)
+            for d in org:
+                seen.add(d.get("id"))
+            if warm and fresh:
+                ages = []
+                for d in fresh:
+                    try:
+                        ages.append((now - datetime.fromisoformat(
+                            d.get("last_refresh_time"))).total_seconds())
+                    except (TypeError, ValueError):
+                        pass
+                ages.sort()
+                gap = (time.time() - last_batch) if last_batch else None
+                if gap:
+                    gaps.append(gap)
+                last_batch = time.time()
+                if ages:
+                    first_ages.append(ages[0])
+                print(f"{time.strftime('%H:%M:%S'):<10} {len(fresh):>6} "
+                      f"{(ages[0]/60 if ages else 0):>9.1f} хв "
+                      f"{(ages[-1]/60 if ages else 0):>9.1f} хв "
+                      f"{(f'{gap/60:.1f} хв' if gap else '—'):>12}")
+            elif not warm:
+                last_batch = time.time()
+            time.sleep(max(0.0, 15 - (time.time() - t0)))
+    except KeyboardInterrupt:
+        print("\n(зупинено вручну)")
+
+    print()
+    if not gaps:
+        print("➜ Жодної пачки не дочекались — або період довший за замір,")
+        print("  або в цей час узагалі нічого не публікують. Спробуйте ввечері.")
+        return 0
+    gaps.sort()
+    first_ages.sort()
+    mid = gaps[len(gaps) // 2]
+    print(f"➜ Пачок: {len(gaps) + 1}. Період між ними: медіана {mid/60:.1f} хв, "
+          f"від {gaps[0]/60:.1f} до {gaps[-1]/60:.1f}.")
+    if first_ages:
+        print(f"  Вік найсвіжішого в пачці: медіана {first_ages[len(first_ages)//2]/60:.1f} хв "
+              f"(кращий випадок {first_ages[0]/60:.1f}).")
+    print(f"  Опитувати частіше, ніж раз на {mid/60:.0f} хв, сенсу не має:")
+    print("  між пачками видача не змінюється взагалі.")
     return 0
 
 
 def main() -> int:
+    if "--batches" in sys.argv[1:]:
+        args = sys.argv[1:]
+        mins = 20.0
+        i = args.index("--batches")
+        if i + 1 < len(args):
+            try:
+                mins = float(args[i + 1])
+            except ValueError:
+                pass
+        return batches_probe(mins)
     if "--freshness" in sys.argv[1:]:
         return freshness_probe()
     if "--rate" in sys.argv[1:]:
