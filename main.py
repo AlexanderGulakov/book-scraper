@@ -322,6 +322,87 @@ def _check_alive(batch: list[tuple[str, str, dict[str, Any]]], session: Any, *,
         return list(pool.map(one, batch))
 
 
+def _prefetch_feeds(jobs: list[tuple[str, str, int]], session: Any, *,
+                    workers: int, pause: float, search_api: bool,
+                    api_fallback: list[int]) -> dict[str, Any]:
+    """{ключ watch'а: список оголошень АБО виняток} — видача, забрана наперед.
+
+    Навіщо. 46 запитів за видачею нічого не знають один про одного, а йшли
+    послідовно: ~30 с самих запитів плюс ~45 с сну між ними на прохід у 75 с
+    (заміряно 2026-10-09). Тут вони йдуть у кілька потоків, а вся решта —
+    стан, правила, сповіщення, звіти — лишається послідовною й недоторканою.
+    Тому функція нічого не вирішує: вона лише ходить у мережу й повертає
+    результат, зокрема й виняток, щоб головний цикл обробив помилку там само,
+    де обробляв завжди (пульс watch'а, лічильник errors).
+
+    ⚠ Сесію між потоками ділити НЕ можна — curl_cffi тримає всередині один
+    curl-хендл. Тому сесій рівно стільки, скільки потоків, і роздає їх черга:
+    одна сесія — одне завдання за раз. Той самий прийом, що в `_check_alive()`.
+
+    ⚠ Частота. Пауза стоїть усередині потоку, тож сумарний темп виходить
+    приблизно `workers / (запит + пауза)`. Замір `probe.py --rate` з бойового
+    IP перевіряв ЧАСТОТУ послідовних запитів (0.25 с → 6 із 6 по 200), а не
+    паралельність, тож тут ми за межами виміряного. Звідси обережне значення
+    за замовчуванням і шлях відступу: `watch_workers: 1` — це рівно стара
+    послідовна поведінка.
+    """
+    out: dict[str, Any] = {}
+    if not jobs:
+        return out
+
+    def fetch(sess: Any, url: str, pages: int) -> Any:
+        if not search_api:
+            return olx.fetch_watch(sess, url, pages=pages)
+        try:
+            return olx.fetch_watch_api(sess, url, pages=pages)
+        except olx.OlxError as exc:
+            api_fallback[0] += 1
+            log.warning("  ⚠ JSON-пошук не вдався (%s) — беру HTML", exc)
+            return olx.fetch_watch(sess, url, pages=pages)
+
+    if workers <= 1 or len(jobs) <= 1:
+        for i, (key, url, pages) in enumerate(jobs):
+            try:
+                out[key] = fetch(session, url, pages)
+            except Exception as exc:  # noqa: BLE001 — віддаємо викликачеві
+                out[key] = exc
+            if i + 1 < len(jobs):
+                time.sleep(pause + random.uniform(0, pause))
+        return out
+
+    import queue
+    from concurrent.futures import ThreadPoolExecutor
+
+    pool_size = min(workers, len(jobs))
+    sessions: queue.Queue = queue.Queue()
+    sessions.put(session)          # ця вже прогріта — платити вдруге нема за що
+    for _ in range(pool_size - 1):
+        s = olx.build_session()
+        try:
+            s.warmup()
+        except Exception:  # noqa: BLE001 — прогрів не критичний
+            pass
+        sessions.put(s)
+
+    def one(job: tuple[str, str, int]) -> tuple[str, Any]:
+        key, url, pages = job
+        sess = sessions.get()
+        try:
+            return key, fetch(sess, url, pages)
+        except Exception as exc:  # noqa: BLE001
+            return key, exc
+        finally:
+            # Пауза ДО повернення сесії в чергу: інакше частоту визначає не
+            # вона, а те, скільки встигне процесор.
+            time.sleep(pause + random.uniform(0, pause))
+            sessions.put(sess)
+
+    with ThreadPoolExecutor(max_workers=pool_size) as pool:
+        for key, res in pool.map(one, jobs):
+            out[key] = res
+    return out
+
+
 def sold_report(cfg: dict[str, Any], state: dict[str, Any], session: Any,
                 *, max_checks: int = 60, pause: float = 1.5, workers: int = 4,
                 max_age_days: float | None = 14, keep_days: float = 60) -> list[str]:
@@ -898,6 +979,33 @@ def run(cfg: dict[str, Any], state: dict[str, Any], *, dry_run: bool,
         sender.send(list(messages))
         messages.clear()
 
+    # Видачу OLX забираємо наперед і паралельно. Умови добору тут МУСЯТЬ
+    # збігатися з умовами циклу нижче (enabled / --only / --skip / due):
+    # зайвий запит — це витрачений час, а пропущений означав би, що watch
+    # тихо не перевірився. Букфлі лишається в циклі: джерело одне, ходить
+    # інакше, і паралелити там нічого.
+    watch_workers = int(defaults.get("watch_workers", 1) or 1)
+    jobs: list[tuple[str, str, int]] = []
+    for idx, w in enumerate(cfg["watches"]):
+        if w.get("enabled") is False or not wanted(w, idx, only or [], skip or []):
+            continue
+        if str({**defaults, **w}.get("source", "olx")).lower() != "olx":
+            continue
+        key = watch_key(w, idx)
+        if not due(state["watches"].get(key) or {}, {**defaults, **w}.get("interval_minutes")):
+            continue
+        jobs.append((key, w["url"], int({**defaults, **w}.get("pages", 1))))
+
+    feeds: dict[str, Any] = {}
+    if jobs:
+        t0 = time.monotonic()
+        feeds = _prefetch_feeds(
+            jobs, session, workers=watch_workers,
+            pause=float(defaults.get("pause_between_watches", 1)),
+            search_api=search_api, api_fallback=api_fallback)
+        log.info("Видача зібрана: %s запит(ів) за %.1f с (потоків: %s)",
+                 len(jobs), time.monotonic() - t0, min(watch_workers, len(jobs)))
+
     for idx, w in enumerate(cfg["watches"]):
         flush()
         if w.get("enabled") is False:
@@ -934,6 +1042,14 @@ def run(cfg: dict[str, Any], state: dict[str, Any], *, dry_run: bool,
                     mode=str(opt.get("mode", "latest")),
                     page_size=int(opt.get("page_size", 48)),
                 )
+            elif key in feeds:
+                # Видача вже забрана наперед (`_prefetch_feeds`). Виняток
+                # звідти піднімаємо тут, щоб його обробив той самий except
+                # нижче: пульс watch'а і лічильник errors лишаються на місці.
+                got = feeds.pop(key)
+                if isinstance(got, BaseException):
+                    raise got
+                ads = got
             elif search_api:
                 # JSON-пошук: ушестеро легший за HTML і несе описи. Якщо він
                 # чомусь не віддався — не падаємо, а доробляємо цей watch по
@@ -1191,8 +1307,12 @@ def run(cfg: dict[str, Any], state: dict[str, Any], *, dry_run: bool,
         # Пауза потрібна лише перед НАСТУПНИМ запитом. Раніше умова рахувала
         # всі watch'і конфігу, включно з вимкненими й відкинутими --skip, тож
         # прогін засинав і після останнього — просто щоб завершитись пізніше.
-        if any(w2.get("enabled") is not False and wanted(w2, i2, only or [], skip or [])
-               for i2, w2 in enumerate(cfg["watches"]) if i2 > idx):
+        # Коли видачу забрали наперед, у цьому циклі мережі для OLX уже немає
+        # (описи мають власну `description_pause`), тож спати тут — значить
+        # платити за ту саму паузу двічі: вона вже відстояна в потоках.
+        if not jobs and any(
+                w2.get("enabled") is not False and wanted(w2, i2, only or [], skip or [])
+                for i2, w2 in enumerate(cfg["watches"]) if i2 > idx):
             time.sleep(float(defaults.get("pause_between_watches", 3))
                        + random.uniform(0, float(defaults.get("pause_jitter", 2))))
 

@@ -470,6 +470,15 @@ def fetch_watch_api(session: Fetcher, url: str, pages: int = 1, *,
             seen.setdefault(ad.id, ad)
         if not ads:
             break
+        # Неповна сторінка означає, що видача скінчилась: наступна віддасть
+        # нуль, і ми заплатимо за це запитом та паузою. Саме це й було в
+        # «Клер: Кассандра Клер» (pages: 3): друга сторінка — 46 із 50,
+        # третя — порожня, ~5 с кожного прогону за ніщо.
+        # Порівнюємо з лімітом, а не з довжиною попередньої сторінки: промо
+        # йдуть ПОНАД ліміт, тож повна сторінка буває і на 51-52 оголошення.
+        if len(ads) < limit:
+            log.debug("  сторінка неповна (%s < %s) — далі не йду", len(ads), limit)
+            break
         if page < pages:
             time.sleep(pause + random.uniform(0, 1.5))
     return list(seen.values())
