@@ -245,7 +245,7 @@ def decide(*, title: str, price: float | None, watch: dict[str, Any],
     hay = f"{title or ''}\n{description or ''}"
 
     # 1. Позиція каталогу може бути помічена як «нам це взагалі не потрібно»
-    #    (сувеніри, альманахи, ілюстровані видання Гаррі Поттера).
+    #    (сувеніри, альманахи, енциклопедії Гаррі Поттера).
     if entry is not None and entry.get("skip"):
         return Decision("skip", reason=f"каталог: {entry.get('name')} позначено skip")
 

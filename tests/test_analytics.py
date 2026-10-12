@@ -93,6 +93,30 @@ def test_bundle_gets_its_own_bucket():
     assert bundle == "Кідрук: Колонія · комплект"
 
 
+def test_illustrated_edition_gets_its_own_bucket():
+    """Ілюстроване коштує втричі більше — окрема позиція, як і комплект."""
+    plain, _ = analytics.book_match("Колонія, Макс Кідрук", "Кідрук", catalog=CATALOG)
+    illus, matched = analytics.book_match(
+        "Колонія Макс Кідрук, ілюстроване видання", "Кідрук", catalog=CATALOG)
+    assert plain == "Кідрук: Колонія"
+    assert (illus, matched) == ("Кідрук: Колонія · ілюстроване", True)
+
+
+def test_illustrated_bundle_keeps_both_marks():
+    name, _ = analytics.book_match(
+        "Комплект «Колонія» Макс Кідрук (illustrated)", "Кідрук", catalog=CATALOG)
+    assert name == "Кідрук: Колонія · комплект · ілюстроване"
+
+
+@pytest.mark.parametrize("title", [
+    # ілюстрації є майже в кожному українському виданні — це не «ілюстроване»
+    "Гаррі Поттер і келих вогню, з ілюстраціями Владислава Єрка",
+    "Книга Гаррі Поттер і таємна кімната",
+])
+def test_ordinary_editions_are_not_illustrated(title):
+    assert not analytics.is_illustrated(title)
+
+
 def test_not_list_blocks_the_entry():
     name, matched = analytics.book_match("Секрет служниці", "Служниця", catalog=CATALOG)
     assert (name, matched) == ("Служниця", False)      # фолбек на назву watch'а

@@ -86,6 +86,19 @@ LOT_MARKERS = [
 _LOT_COUNT_RE = re.compile(r"\b(\d{2,3})\s*(?:шт|кн|книг)", re.IGNORECASE)
 LOT_MIN_COUNT = 10           # «41 шт.» — точно не одна книжка
 
+# Ілюстровані («великоформатні», Джим Кей) — це та сама книжка, але інший
+# товар: коштує втричі-вчетверо більше за звичайну й лежить довше. Мішати їх
+# в одну вибірку означає отримати медіану, за якою не існує ні звичайного, ні
+# ілюстрованого видання. Тому не викидаємо (їх теж цікаво бачити), а веземо
+# окремою позицією — так само, як комплекти.
+#
+# ⚠ Корені вузькі навмисне: в українських виданнях ілюстрації є майже в усіх
+# («з ілюстраціями Владислава Єрка»), і ширший корінь зробив би «ілюстрованим»
+# пів ринку. Ознака — саме «ілюстроване видання».
+ILLUSTRATED_MARKERS = [
+    "ілюстрован", "иллюстрирован", "illustrated", "джим кей", "jim kay",
+]
+
 
 def _opts(cfg: dict[str, Any]) -> dict[str, Any]:
     return {**DEFAULTS, **(cfg.get("defaults") or {})}
@@ -113,6 +126,12 @@ def is_lot(title: str, markers: Iterable[str] = ()) -> bool:
     return bool(m and int(m.group(1)) >= LOT_MIN_COUNT)
 
 
+def is_illustrated(title: str, markers: Iterable[str] = ()) -> bool:
+    """Ілюстроване видання — окремий товар, а не та сама книжка дорожче."""
+    t = (title or "").casefold()
+    return any(m in t for m in (markers or ILLUSTRATED_MARKERS) if m)
+
+
 def title_is_bundle(title: str, watch_name: str = "", *,
                     catalog: Iterable[dict[str, Any]] = (),
                     include: Iterable[str] = (),
@@ -130,8 +149,8 @@ _entry_matches = bundles.entry_matches
 
 
 def book_match(title: str, watch_name: str, *, catalog: Iterable[dict[str, Any]] = (),
-               include: Iterable[str] = (), bundle_keywords: Iterable[str] = ()
-               ) -> tuple[str, bool]:
+               include: Iterable[str] = (), bundle_keywords: Iterable[str] = (),
+               illustrated_markers: Iterable[str] = ()) -> tuple[str, bool]:
     """(назва книги, чи збіглось із каталогом).
 
     Гібрид, як і домовлялись: спершу явний каталог `books:` з watches.yaml
@@ -146,12 +165,20 @@ def book_match(title: str, watch_name: str, *, catalog: Iterable[dict[str, Any]]
     """
     bundle = title_is_bundle(title, watch_name, catalog=catalog, include=include,
                              bundle_keywords=bundle_keywords)
+    illus = is_illustrated(title, illustrated_markers)
+
+    def tag(name: str, *, with_bundle: bool = True) -> str:
+        if with_bundle and bundle:
+            name = f"{name} · комплект"
+        return f"{name} · ілюстроване" if illus else name
+
     for entry in bundles.matching_entries(title or "", watch_name, catalog):
         name = str(entry.get("name") or watch_name)
         if entry.get("bundle"):
-            return name, True                # позиція каталогу вже про комплект
-        return (f"{name} · комплект" if bundle else name), True
-    return (f"{watch_name} · комплект" if bundle else watch_name), False
+            # позиція каталогу вже про комплект
+            return tag(name, with_bundle=False), True
+        return tag(name), True
+    return tag(watch_name), False
 
 
 def book_key(title: str, watch_name: str, **kw: Any) -> str:
@@ -256,7 +283,8 @@ def collect(cfg: dict[str, Any], state: dict[str, Any], *,
     def classify(title: str, wname: str, w: dict[str, Any]) -> tuple[str, bool]:
         return book_match(title, wname, catalog=catalog,
                           include=w.get("include_keywords") or [],
-                          bundle_keywords=w.get("bundle_keywords") or [])
+                          bundle_keywords=w.get("bundle_keywords") or [],
+                          illustrated_markers=opt.get("illustrated_markers") or ())
 
     # ---- продані
     too_old = [0]
@@ -400,7 +428,8 @@ def cheapest_ranked(cfg: dict[str, Any], state: dict[str, Any], *,
                 continue
             name, from_catalog = book_match(title, wname, catalog=catalog,
                                             include=w.get("include_keywords") or [],
-                                            bundle_keywords=w.get("bundle_keywords") or [])
+                                            bundle_keywords=w.get("bundle_keywords") or [],
+                                            illustrated_markers=opt.get("illustrated_markers") or ())
             # 🔑 Лише коли книжку впізнав КАТАЛОГ. Інакше ключем стає назва
             # watch'а, а вона об'єднує все, що той watch ловить: у «Бункері»
             # під одним ключем опинялись і Г'ю Хауї, і «Зимою в бункер», і
@@ -551,7 +580,8 @@ def verdict_for_ad(ad: Any, watch_name: str, cfg: dict[str, Any],
     key = book_key(getattr(ad, "title", "") or "", watch_name,
                    catalog=cfg.get("books") or [],
                    include=w.get("include_keywords") or [],
-                   bundle_keywords=w.get("bundle_keywords") or [])
+                   bundle_keywords=w.get("bundle_keywords") or [],
+                   illustrated_markers=opt.get("illustrated_markers") or ())
     return verdict(getattr(ad, "price", None), prof_map.get(key), opt)
 
 

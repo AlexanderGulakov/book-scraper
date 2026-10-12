@@ -812,7 +812,9 @@ class CheapestNow:
             getattr(ad, "title", "") or "", watch_name,
             catalog=self.cfg.get("books") or [],
             include=w.get("include_keywords") or [],
-            bundle_keywords=w.get("bundle_keywords") or [])
+            bundle_keywords=w.get("bundle_keywords") or [],
+            illustrated_markers=(self.cfg.get("defaults") or {}).get(
+                "illustrated_markers") or ())
 
     def _alive(self, row: dict[str, Any]) -> bool:
         ad_id = str(row.get("id"))

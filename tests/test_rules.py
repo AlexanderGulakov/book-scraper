@@ -25,7 +25,7 @@ HP = {
     "max_price": 250,
     "needs_description": True,
     "drop_russian": True,
-    "drop_keywords": ["альманах", "ілюстрован", "illustrated"],
+    "drop_keywords": ["альманах", "енциклопед"],
     "notify_max_price": 180,
 }
 
@@ -112,10 +112,11 @@ def test_almanac_is_not_a_book_from_the_series():
     assert d.action == "skip"
 
 
-def test_illustrated_edition_is_dropped():
+def test_illustrated_edition_is_kept():
+    # Ілюстровані видання більше не відсіюємо (знято 2026-10-12).
     d = rules.decide(title="Гаррі Поттер і філософський камінь ілюстроване видання",
                      price=900, watch=HP, entry=None)
-    assert d.action == "skip"
+    assert d.action != "skip"
 
 
 def test_cursed_child_telegram_and_analytics_bands():
