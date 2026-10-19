@@ -350,6 +350,36 @@ books:
   - name: "Кінг: Безсоння"
     any: ["безсоння", "insomnia"]
 
+  # ── «Темна вежа»: каталог тут НЕ через пороги, а щоб статистика не
+  # розсипалась. Ці вісім книжок шукають дев'ять запитів, що перетинаються:
+  # «Крізь час», знайдене збірним «темна вежа кінг», без каталогу лягло б у
+  # статистику під назвою watch'а, тобто окремо від того самого «Крізь час»,
+  # знайденого точковим запитом. Каталог зводить обидва випадки в одну книжку.
+  #
+  # `all` там, де назва з двох слів, щоб не ловити випадкові збіги; `any` —
+  # для варіантів перекладу. Номер тому в назві потрібен, бо сам «Стрілець»
+  # у звіті нічого не каже.
+  - name: "Темна вежа I: Стрілець"
+    any: ["стрілець", "шукач", "gunslinger"]
+    not: ["стрілецьк"]
+  - name: "Темна вежа II: Крізь час"
+    all: ["крізь час"]
+  - name: "Темна вежа III: Загублена земля"
+    any: ["загублена земл", "загубленої земл", "waste lands"]
+  - name: "Темна вежа IV: Чаклун та сфера"
+    any: ["чаклун та сфера", "чаклун і сфера", "wizard and glass"]
+  - name: "Темна вежа IV.5: Вітер у замкову шпарину"
+    any: ["замкову шпарину", "замкову щілину", "keyhole"]
+  - name: "Темна вежа V: Вовки Кальї"
+    any: ["вовки кал", "wolves of the calla"]
+  - name: "Темна вежа VI: Пісня Сюзанни"
+    any: ["пісня сюзанн", "song of susannah"]
+  # Том VII — остання позиція циклу: сюди падає все, що зветься просто
+  # «Темна вежа» і не збіглося з жодним томом вище. Тому вона стоїть НИЖЧЕ
+  # за решту: каталог бере перший збіг.
+  - name: "Темна вежа VII"
+    any: ["темна вежа", "темної вежі", "dark tower"]
+
   # Нова книжка (2026-10-09). Поки що слати ВСЕ, без огляду на ціну: ринку ще
   # немає — чотири оголошення на всю OLX, — і поки не видно, скільки за неї
   # реально просять, будь-який поріг був би вгадуванням. `max_price` лишається
@@ -1115,6 +1145,24 @@ watches:
       # в базі, а дзвонить у Telegram. Українське видання зветься «Ніколи не
       # здригайся» — коренем вище воно ловиться повністю.
       - "здригайся"
+      # ── «Темна вежа», усі вісім томів (додано 2026-10-19) ───────────────
+      # Українські видання КСД несуть назву циклу просто в заголовку тому
+      # («Крізь час. Темна вежа II»), тож збірний запит ловить більшість. Але
+      # продавці часто пишуть лише назву книжки, тому кожен том має ще й
+      # власний корінь.
+      - "темна вежа"
+      - "темної вежі"
+      - "dark tower"
+      - "стрілець"                  # том I; «Шукач» — назва старішого перекладу
+      - "шукач"
+      - "крізь час"                 # том II
+      - "загублена земл"            # том III, і «загубленої землі»
+      - "чаклун та сфера"           # том IV
+      - "чаклун і сфера"
+      - "вовки кал"                 # том V: «Вовки Кальї», «Вовки Калья»
+      - "пісня сюзанн"              # том VI
+      - "замкову шпарину"           # «Вітер у замкову шпарину» і варіант
+      - "замкову щілину"            # перекладу «Вітер крізь замкову щілину»
     exclude_keywords: &king_noise
       - "польською"           # польські видання трапляються і дешеві
       - "польськ"
@@ -1236,6 +1284,83 @@ watches:
     notify_max_price: *king_max
     include_keywords: *king_books
     exclude_keywords: *king_noise
+
+  # ── Стівен Кінг: «Темна вежа», вісім томів ────────────────────────────────
+  # ⚠ Видачу НЕ заміряно, на відміну від решти watch'ів у цьому файлі: там, де
+  # це писалось, OLX був недоступний. Тож числа «скільки з них по темі» тут
+  # відсутні свідомо, а не забулись. Перший же прогін покаже їх сам — рядки
+  # «знайдено N, після фільтрів M», — і запит, у якому після фільтрів стабільно
+  # нуль, треба прибрати: кожен коштує ~0.5 с проходу.
+  #
+  # Чому запитів вісім, а не один. Українські видання несуть назву циклу в
+  # заголовку тому («Крізь час. Темна вежа II»), тому збірний запит ловить
+  # більшість. Але продавці часто пишуть лише назву книжки — на це й розраховані
+  # точкові запити. Там, де назва сама по собі унікальна («вовки кальї», «пісня
+  # сюзанни», «чаклун та сфера»), прізвища в запиті немає: воно лише відсікло б
+  # оголошення, підписані самою назвою (claude/strike-coverage.md). Де назва
+  # родова («стрілець», «крізь час», «загублена земля») — «кінг» обов'язковий,
+  # інакше у видачу поїде пів категорії.
+  - name: "Кінг: Темна вежа (цикл)"
+    url: "https://www.olx.ua/uk/hobbi-otdyh-i-sport/knigi-zhurnaly/q-%D1%82%D0%B5%D0%BC%D0%BD%D0%B0-%D0%B2%D0%B5%D0%B6%D0%B0-%D0%BA%D1%96%D0%BD%D0%B3/?currency=UAH&search%5Border%5D=created_at%3Adesc"
+    max_price: *king_max
+    notify_max_price: *king_max
+    include_keywords: *king_books
+    exclude_keywords: *king_noise
+
+  - name: "Темна вежа I: Стрілець"
+    url: "https://www.olx.ua/uk/hobbi-otdyh-i-sport/knigi-zhurnaly/q-%D1%81%D1%82%D1%80%D1%96%D0%BB%D0%B5%D1%86%D1%8C-%D0%BA%D1%96%D0%BD%D0%B3/?currency=UAH&search%5Border%5D=created_at%3Adesc"
+    max_price: *king_max
+    notify_max_price: *king_max
+    include_keywords: *king_books
+    exclude_keywords: *king_noise
+
+  - name: "Темна вежа II: Крізь час"
+    url: "https://www.olx.ua/uk/hobbi-otdyh-i-sport/knigi-zhurnaly/q-%D0%BA%D1%80%D1%96%D0%B7%D1%8C-%D1%87%D0%B0%D1%81-%D0%BA%D1%96%D0%BD%D0%B3/?currency=UAH&search%5Border%5D=created_at%3Adesc"
+    max_price: *king_max
+    notify_max_price: *king_max
+    include_keywords: *king_books
+    exclude_keywords: *king_noise
+
+  - name: "Темна вежа III: Загублена земля"
+    url: "https://www.olx.ua/uk/hobbi-otdyh-i-sport/knigi-zhurnaly/q-%D0%B7%D0%B0%D0%B3%D1%83%D0%B1%D0%BB%D0%B5%D0%BD%D0%B0-%D0%B7%D0%B5%D0%BC%D0%BB%D1%8F-%D0%BA%D1%96%D0%BD%D0%B3/?currency=UAH&search%5Border%5D=created_at%3Adesc"
+    max_price: *king_max
+    notify_max_price: *king_max
+    include_keywords: *king_books
+    exclude_keywords: *king_noise
+
+  - name: "Темна вежа IV: Чаклун та сфера"
+    url: "https://www.olx.ua/uk/hobbi-otdyh-i-sport/knigi-zhurnaly/q-%D1%87%D0%B0%D0%BA%D0%BB%D1%83%D0%BD-%D1%82%D0%B0-%D1%81%D1%84%D0%B5%D1%80%D0%B0/?currency=UAH&search%5Border%5D=created_at%3Adesc"
+    max_price: *king_max
+    notify_max_price: *king_max
+    include_keywords: *king_books
+    exclude_keywords: *king_noise
+
+  - name: "Темна вежа IV.5: Вітер у замкову шпарину"
+    # Запит обрізаний до «вітер замкову»: назву перекладають двома
+    # способами — «у замкову шпарину» і «крізь замкову щілину», — і
+    # спільні в них лише ці два слова.
+    url: "https://www.olx.ua/uk/hobbi-otdyh-i-sport/knigi-zhurnaly/q-%D0%B2%D1%96%D1%82%D0%B5%D1%80-%D0%B7%D0%B0%D0%BC%D0%BA%D0%BE%D0%B2%D1%83/?currency=UAH&search%5Border%5D=created_at%3Adesc"
+    max_price: *king_max
+    notify_max_price: *king_max
+    include_keywords: *king_books
+    exclude_keywords: *king_noise
+
+  - name: "Темна вежа V: Вовки Кальї"
+    url: "https://www.olx.ua/uk/hobbi-otdyh-i-sport/knigi-zhurnaly/q-%D0%B2%D0%BE%D0%B2%D0%BA%D0%B8-%D0%BA%D0%B0%D0%BB%D1%8C%D1%97/?currency=UAH&search%5Border%5D=created_at%3Adesc"
+    max_price: *king_max
+    notify_max_price: *king_max
+    include_keywords: *king_books
+    exclude_keywords: *king_noise
+
+  - name: "Темна вежа VI: Пісня Сюзанни"
+    url: "https://www.olx.ua/uk/hobbi-otdyh-i-sport/knigi-zhurnaly/q-%D0%BF%D1%96%D1%81%D0%BD%D1%8F-%D1%81%D1%8E%D0%B7%D0%B0%D0%BD%D0%BD%D0%B8/?currency=UAH&search%5Border%5D=created_at%3Adesc"
+    max_price: *king_max
+    notify_max_price: *king_max
+    include_keywords: *king_books
+    exclude_keywords: *king_noise
+
+  # Том VII зветься просто «Темна вежа» — власний запит був би копією
+  # збірного, тож його тут свідомо немає.
 
   # ── Сюзанна Коллінз ───────────────────────────────────────────────────────
   # «Світанок перед жнивами» — приквел «Голодних ігор». Назва унікальна, тож
