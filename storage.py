@@ -334,7 +334,37 @@ class MongoStore:
         log.info("Mongo читання: %s | оголошень %s, watch'ів %s, знятих %s",
                  ", ".join(f"{k} {v:.1f}" for k, v in t.items()),
                  n_ads, len(watches), len(sold))
+        self._log_sizes()
         return state
+
+    def _log_sizes(self) -> None:
+        """Скільки в колекціях байтів, а не лише документів.
+
+        Навіщо. `ping` коштує ~0, тобто одне звернення до Atlas дешеве, —
+        а читання триває 24 с. Отже справа не в латентності й не в кількості
+        round-trip'ів, а в тому, СКІЛЬКИ ми щохвилини тягнемо. Кількість
+        документів цього не каже: 45 watch'ів читались 2.4 с, тобто кожен
+        удесятеро дорожчий за оголошення, — а це означає, що вони товсті
+        (у кожному лежить `dropped`, список відкинутих id за 30 днів).
+
+        `collStats` — одна команда на колекцію, без повторного кодування
+        документів. Діагностика не сміє валити прогін, тож усе в try.
+        """
+        parts = []
+        for label, coll in (("оголошення", COLL_ADS), ("watch'і", COLL_WATCHES),
+                            ("зняті", COLL_SOLD), ("ціни", COLL_PRICES)):
+            try:
+                st = self.db.command("collStats", coll)
+                n = int(st.get("count") or 0)
+                avg = int(st.get("avgObjSize") or 0)
+                if not n:
+                    continue
+                parts.append(f"{label} {n} × {avg / 1024:.1f} КБ = "
+                             f"{n * avg / 1024 / 1024:.1f} МБ")
+            except Exception:  # noqa: BLE001 — діагностика не сміє валити прогін
+                return
+        if parts:
+            log.info("Mongo обсяг: %s", ", ".join(parts))
 
     def claim(self, field: str, not_before: str) -> bool:
         """Атомарно «застовпити» звіт: True дістається рівно одному прогону.
