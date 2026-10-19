@@ -936,6 +936,89 @@ class Timings(dict):
         return f"{total:.1f} с = " + ", ".join(parts)
 
 
+def sanitize(cfg: dict[str, Any], state: dict[str, Any], session: Any, *,
+             pause: float, workers: int, stale_hours: float = 48.0,
+             max_checks: int = 10 ** 6) -> dict[str, int]:
+    """Разова чистка бази: перевірити все підозріле й розкласти по місцях.
+
+    Навіщо окремий режим, коли є годинний звіт. Звіт живе під двома
+    обмеженнями, і обидва потрібні йому самому, але шкідливі для чистки:
+    бюджет 60 перевірок за прогін і поріг `sold_check_max_age_days` (14 днів),
+    за яким оголошення з черги просто викидається. Тобто все, що зникло
+    давніше за два тижні, звіт НЕ перевіряє ніколи — воно лежить у базі, псує
+    «найдешевше зараз» і медіани, аж доки `prune_days` не забуде його через
+    місяць. Тут обидва обмеження зняті.
+
+    Друга різниця — ширша черга. Звіт дивиться лише на тих, кому прогін
+    поставив `miss` (не було у видачі). Але оголошення watch'а, який давно не
+    ходив — вимкнений, перейменований, зі збільшеним `interval_minutes`, —
+    `miss` не отримує взагалі: його ніхто не питав. Такі впізнаються за
+    застарілим `seen`, і тут вони теж ідуть у чергу.
+
+    Що робить зі знятим — рівно те саме, що звіт: прибирає з `watches` і
+    кладе в `sold` з датою. Ніякої окремої логіки видалення тут немає
+    НАВМИСНО: два шляхи «як ми ховаємо оголошення» розійшлись би першою ж
+    правкою, і статистика почала б залежати від того, хто саме його знайшов.
+
+    Повідомлення для Telegram не надсилаються: на сотні знятих це була б
+    сотня повідомлень про те, що сталось місяць тому. Підсумок — у лог.
+    """
+    now_dt = datetime.now(timezone.utc)
+    cutoff = (now_dt - timedelta(hours=float(stale_hours))).isoformat()
+    marked = 0
+    total = 0
+    for ws in state["watches"].values():
+        for rec in (ws.get("ads") or {}).values():
+            total += 1
+            if rec.get("miss"):
+                continue
+            if str(rec.get("seen") or "") < cutoff:
+                # Його не було у свіжій видачі — але й не було кому це
+                # помітити. Для черги перевірки це той самий стан.
+                rec["miss"] = now_dt.isoformat()
+                marked += 1
+
+    queued = sum(1 for ws in state["watches"].values()
+                 for rec in (ws.get("ads") or {}).values() if rec.get("miss"))
+    log.info("Чистка: у базі %s оголошень, у черзі на перевірку %s "
+             "(з них %s додано за застарілим seen)", total, queued, marked)
+    if queued:
+        log.info("Орієнтовно %.0f хв: %s перевірок у %s потоків",
+                 queued * (1.0 + pause) / max(workers, 1) / 60, queued, workers)
+
+    before = len(state.get("sold") or [])
+    sold_report(cfg, state, session, max_checks=max_checks, pause=pause,
+                workers=workers, max_age_days=None)
+    after = len(state.get("sold") or [])
+    left = sum(len(ws.get("ads") or {}) for ws in state["watches"].values())
+    log.info("Чистка завершена: було %s оголошень, лишилось %s, знято %s",
+             total, left, after - before)
+    return {"total": total, "queued": queued, "marked": marked,
+            "gone": after - before, "left": left}
+
+
+def floor_minutes(dt: datetime, minutes: int) -> str:
+    """Час, зрізаний до кратності `minutes`, в ISO. `minutes <= 1` — без зрізу.
+
+    Навіщо. Мітка «востаннє бачили» писалась з точністю до мікросекунди, тож
+    КОЖНЕ оголошення з видачі відрізнялось від збереженого щохвилини — і
+    `save()` переписував усі 469 документів навіть тоді, коли на ринку не
+    сталось нічого. Заміряно 2026-10-19: 11 с із 64 на тихому проході.
+
+    Зріз прибирає саме цю фальшиву різницю, нічого не буферизуючи: ціна,
+    нове оголошення, `miss`, `told` змінюють запис і пишуться тієї ж секунди.
+    Точність потрібна лише двом споживачам — `prune_days` (30 днів) і
+    `stalled_seen_hours` (48 годин), — тож чверть години для них непомітна.
+
+    ⚠ Ціна рішення: на межі чверті години переписуються ВСІ записи одразу,
+    тобто рівномірне навантаження стає сплеском раз на 15 хв.
+    """
+    if minutes <= 1:
+        return dt.isoformat()
+    return dt.replace(minute=(dt.minute // minutes) * minutes,
+                      second=0, microsecond=0).isoformat()
+
+
 def run(cfg: dict[str, Any], state: dict[str, Any], *, dry_run: bool,
         only: list[str] | None = None, skip: list[str] | None = None,
         store: Any = None, reports: bool = True,
@@ -955,7 +1038,10 @@ def run(cfg: dict[str, Any], state: dict[str, Any], *, dry_run: bool,
     session = olx.build_session()
     messages: list[str] = []
     errors = 0
-    now = datetime.now(timezone.utc).isoformat()
+    now_dt = datetime.now(timezone.utc)
+    now = now_dt.isoformat()
+    # Мітка «востаннє бачили» — зрізана (див. `floor_minutes`).
+    seen_stamp = floor_minutes(now_dt, int(defaults.get("seen_round_minutes", 15)))
     # Одне оголошення — одне повідомлення НАЗАВЖДИ, а не за прогін: пошуки
     # перетинаються навмисне, і другий watch зустрічає ту саму книжку вже
     # наступним прогоном. Пам'ять про це живе в `state["told"]` — див.
@@ -1274,7 +1360,7 @@ def run(cfg: dict[str, Any], state: dict[str, Any], *, dry_run: bool,
                 "price": ad.price,
                 "cur": ad.currency,
                 "title": ad.title[:120],
-                "seen": now,
+                "seen": seen_stamp,
                 # Для звіту про зняті оголошення: за посиланням ми потім
                 # питаємо, чи воно ще живе, а дати дають «скільки пролежало».
                 "url": ad.url or prev.get("url"),
@@ -1780,6 +1866,9 @@ def main() -> int:
                          "хибне спрацювання, дивне видання)")
     ap.add_argument("--unexclude", metavar="ID|URL", action="append", default=[],
                     help="скасувати ручну позначку (випадково натиснув кнопку)")
+    ap.add_argument("--sanitize", action="store_true",
+                    help="разова чистка бази: перевірити всі зниклі оголошення "
+                         "без бюджету й вікна, зняті перекласти в sold")
     ap.add_argument("--poll-marks", action="store_true",
                     help="лише забрати натискання кнопок з Telegram і вийти — "
                          "без жодного запиту в OLX, секунда роботи")
@@ -1829,6 +1918,27 @@ def main() -> int:
         log.info(".env: підхопив %s", ", ".join(from_env_file))
 
     cfg = load_config(args.config)
+
+    if args.sanitize:
+        # Окремий режим, а не прапорець до прогону: тут сотні запитів в OLX і
+        # жодного сповіщення, тож мішати це зі звичайним проходом не можна.
+        store = storage.open_store(state_path=args.state, mode=args.storage,
+                                   uri=args.mongo_uri, db_name=args.mongo_db)
+        state = store.load()
+        defaults = cfg.get("defaults", {}) or {}
+        stats = sanitize(
+            cfg, state, olx.build_session(),
+            pause=float(defaults.get("sold_report_pause", 1.5)),
+            workers=int(defaults.get("sold_report_workers", 4)),
+            stale_hours=float(defaults.get("stalled_seen_hours", 48)),
+        )
+        if args.dry_run:
+            log.info("--dry-run: стан НЕ збережено, у базі нічого не змінилось")
+        else:
+            store.save(state)
+            log.info("Стан збережено: %s", store.describe())
+        store.close()
+        return 0 if stats["total"] else 1
 
     if args.poll_marks:
         # Окремий режим, бо кнопка в Telegram крутить «годинник», доки хтось не

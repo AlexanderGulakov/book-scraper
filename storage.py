@@ -39,6 +39,8 @@ from __future__ import annotations
 import copy
 import logging
 import os
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -262,15 +264,35 @@ class MongoStore:
     # ── читання ─────────────────────────────────────────────────────────────
 
     def load(self) -> dict[str, Any]:
-        """Збирає з колекцій рівно той dict, що раніше лежав у файлі."""
-        state = empty_state()
+        """Збирає з колекцій рівно той dict, що раніше лежав у файлі.
 
+        Пише в лог розкладку часу. Навіщо: прохід 2026-10-19 витрачав на
+        читання 26.4 с при 469 оголошеннях — а це на два порядки більше за
+        норму для такої дрібної бази. Поки не видно, яка саме колекція (чи
+        взагалі не колекція, а один round-trip до Atlas) це з'їдає,
+        оптимізувати нема чого: обсяг тут ні до чого. `ping` стоїть першим
+        саме для цього — він показує ціну ОДНОГО звернення.
+        """
+        state = empty_state()
+        t = {}
+
+        t0 = time.monotonic()
+        try:
+            self.client.admin.command("ping")
+        except Exception:  # noqa: BLE001 — діагностика не сміє валити прогін
+            pass
+        t["ping"] = time.monotonic() - t0
+
+        t0 = time.monotonic()
         meta = self.db[COLL_STATE].find_one({"_id": STATE_ID}) or {}
         for field in META_FIELDS:
             if meta.get(field) is not None:
                 state[field] = meta[field]
         state.setdefault("version", STATE_VERSION)
 
+        t["meta"] = time.monotonic() - t0
+
+        t0 = time.monotonic()
         watches: dict[str, Any] = {}
         for doc in self.db[COLL_WATCHES].find({}):
             key = str(doc.pop("_id"))
@@ -278,7 +300,12 @@ class MongoStore:
             doc["ads"] = {}
             watches[key] = doc
 
+        t["watches"] = time.monotonic() - t0
+
+        t0 = time.monotonic()
+        n_ads = 0
         for doc in self.db[COLL_ADS].find({}):
+            n_ads += 1
             ident = doc.get("_id") or {}
             key, ad = str(ident.get("w", "")), str(ident.get("a", ""))
             if not key or not ad:
@@ -286,18 +313,27 @@ class MongoStore:
             rec = {k: v for k, v in doc.items() if k not in ("_id", "w", "a")}
             watches.setdefault(key, {"seeded": False, "ads": {}}).setdefault("ads", {})[ad] = rec
 
+        t["ads"] = time.monotonic() - t0
         state["watches"] = watches
 
+        t0 = time.monotonic()
         sold = [
             {k: v for k, v in doc.items() if k != "_id"}
             for doc in self.db[COLL_SOLD].find({}).sort("gone", 1)
         ]
+        t["sold"] = time.monotonic() - t0
         if sold:
             state["sold"] = sold
 
         # Знімок для діфа. Глибока копія обов'язкова: далі код мутує state
         # на місці, і поверхнева копія показала б «змін немає».
+        t0 = time.monotonic()
         self._snapshot = copy.deepcopy(state)
+        t["копія"] = time.monotonic() - t0
+
+        log.info("Mongo читання: %s | оголошень %s, watch'ів %s, знятих %s",
+                 ", ".join(f"{k} {v:.1f}" for k, v in t.items()),
+                 n_ads, len(watches), len(sold))
         return state
 
     def claim(self, field: str, not_before: str) -> bool:
@@ -378,7 +414,11 @@ class MongoStore:
             # Історія цін: перша поява або зміна ціни.
             price = rec.get("price")
             if price is not None and (prev is None or prev.get("price") != price):
-                at = str(rec.get("seen") or "")
+                # НЕ `seen`: відколи та мітка зрізається до чверті години
+                # (`floor_minutes`), дві зміни ціни в одній чверті мали б
+                # однаковий `_id`, і `$setOnInsert` мовчки лишив би першу.
+                # Момент запису від спостереження відстає на секунди.
+                at = datetime.now(timezone.utc).isoformat()
                 price_ops.append(UpdateOne(
                     {"_id": {"a": ad, "at": at}},
                     {"$setOnInsert": {
@@ -393,8 +433,13 @@ class MongoStore:
             counts["ads_deleted"] += 1
         counts["ads"] = len(ad_ops) - counts["ads_deleted"]
         counts["prices"] = len(price_ops)
+        wt = {}
+        t0 = time.monotonic()
         self._bulk(self.db[COLL_ADS], ad_ops)
+        wt["оголошення"] = time.monotonic() - t0
+        t0 = time.monotonic()
         self._bulk(self.db[COLL_PRICES], price_ops)
+        wt["ціни"] = time.monotonic() - t0
 
         # 2. Службові поля watch'ів.
         cur_w = state.get("watches") or {}
@@ -410,7 +455,9 @@ class MongoStore:
         for key in orphans:
             w_ops.append(DeleteOne({"_id": key}))
             counts["watches_deleted"] += 1
+        t0 = time.monotonic()
         self._bulk(self.db[COLL_WATCHES], w_ops)
+        wt["watch'і"] = time.monotonic() - t0
         if orphans:
             # Watch зник із конфігу (перейменували) — його оголошення теж
             # більше нікому не належать.
@@ -433,7 +480,9 @@ class MongoStore:
         for ident in old_sold.keys() - cur_sold.keys():
             s_ops.append(DeleteOne({"_id": dict(zip(("w", "a", "g"), ident))}))
             counts["sold_deleted"] += 1
+        t0 = time.monotonic()
         self._bulk(self.db[COLL_SOLD], s_ops)
+        wt["зняті"] = time.monotonic() - t0
 
         # 4. meta — останньою: це «прогін дорахував до кінця».
         meta = {"_id": STATE_ID, "version": state.get("version", STATE_VERSION)}
@@ -444,13 +493,19 @@ class MongoStore:
         for field in META_FIELDS[1:]:
             if snap.get(field) is not None:
                 old_meta[field] = snap[field]
+        t0 = time.monotonic()
         if meta != old_meta:
             self.db[COLL_STATE].replace_one({"_id": STATE_ID}, meta, upsert=True)
             counts["meta"] = 1
+        wt["meta"] = time.monotonic() - t0
 
         # Новий знімок — щоб повторний save() у тому ж процесі не переписував
         # усе вдруге.
+        t0 = time.monotonic()
         self._snapshot = copy.deepcopy(state)
+        wt["копія"] = time.monotonic() - t0
+        log.info("Mongo запис: %s",
+                 ", ".join(f"{k} {v:.1f}" for k, v in wt.items()))
         log.info(
             "Mongo: оголошень %s (видалено %s), watch'ів %s (видалено %s), "
             "знятих %s, цін %s",
