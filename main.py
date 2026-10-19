@@ -887,8 +887,16 @@ class CheapestNow:
 
 
 def daily_book_report(cfg: dict[str, Any], state: dict[str, Any],
-                      *, store: Any = None) -> list[str]:
-    """Раз на добу — один звіт «за скільки що беруть». Без мережі, лише стан."""
+                      *, store: Any = None, ensure: Any = None) -> list[str]:
+    """Раз на добу — один звіт «за скільки що беруть». Без мережі, лише стан.
+
+    `ensure` — дочитати історію знятих, і саме ТУТ, а не в місці виклику.
+    Ця функція кличеться щопроходу, а звітує раз на добу: усі перевірки
+    («чи ввімкнена аналітика», «чи час», «чи не застовпив інший прогін»)
+    живуть усередині. Виклик `ensure_sold()` перед нею коштував 5.6 с НА
+    КОЖНОМУ проході — заміряно 2026-10-19 на живому циклі, одразу після
+    того, як ці самі 5.6 с прибрали з читання стану.
+    """
     opt = {**analytics.DEFAULTS, **(cfg.get("defaults") or {})}
     if not opt.get("analytics_enabled", True):
         return []
@@ -901,6 +909,8 @@ def daily_book_report(cfg: dict[str, Any], state: dict[str, Any],
     if store is not None and not store.claim("book_report_date", today):
         log.info("Денний звіт уже застовпив інший прогін — мовчу")
         return []
+    if ensure is not None:
+        ensure()
     parts = analytics.build_report(cfg, state, esc=notify.esc)
     # Позначаємо день як відзвітований у будь-якому разі: інакше порожній
     # звіт перевірявся б наново щопрогону до півночі.
@@ -1510,9 +1520,10 @@ def run(cfg: dict[str, Any], state: dict[str, Any], *, dry_run: bool,
     # питає в OLX і не залежить від того, чи вдався цей конкретний прогін.
     if reports and not dry_run:
         try:
-            ensure_sold(store, state)
             with tm.took("звіти"):
-                messages.extend(daily_book_report(cfg, state, store=store))
+                messages.extend(daily_book_report(
+                    cfg, state, store=store,
+                    ensure=lambda: ensure_sold(store, state)))
         except Exception as exc:  # noqa: BLE001
             log.warning("Денний звіт про ціни не склався: %s", exc)
 

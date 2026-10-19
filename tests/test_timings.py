@@ -86,3 +86,29 @@ def test_run_заповнює_передану_розкладку(monkeypatch):
     tm = app.Timings()
     app.run(cfg, state, dry_run=True, reports=False, timings=tm)
     assert tm.get("видача", 0) >= 0.01, "забір видачі мав потрапити в розкладку"
+
+
+def test_денний_звіт_не_чіпає_історію_коли_не_час(monkeypatch):
+    """🔑 Історія знятих дочитується всередині звіту, а не перед ним.
+
+    Звіт кличеться щопроходу, а звітує раз на добу. Поки `ensure_sold()`
+    стояв у місці виклику, він читав 0.4 МБ на КОЖНОМУ проході — рівно ті
+    5.6 с, які перед цим прибрали з читання стану (замір 2026-10-19).
+    """
+    calls = []
+    monkeypatch.setattr(app.analytics, "report_due", lambda *a, **k: False)
+    out = app.daily_book_report({"defaults": {}}, {"version": 1, "watches": {}},
+                                ensure=lambda: calls.append(1))
+    assert out == [] and not calls, "не час — історія не потрібна"
+
+
+def test_денний_звіт_дочитує_історію_коли_час(monkeypatch):
+    """А коли час — історія мусить бути на місці ДО того, як її рахують."""
+    seen = []
+    monkeypatch.setattr(app.analytics, "report_due", lambda *a, **k: True)
+    monkeypatch.setattr(app.analytics, "mark_reported", lambda *a, **k: None)
+    monkeypatch.setattr(app.analytics, "build_report",
+                        lambda *a, **k: seen.append("рахую") or [])
+    app.daily_book_report({"defaults": {}}, {"version": 1, "watches": {}},
+                          ensure=lambda: seen.append("дочитав"))
+    assert seen == ["дочитав", "рахую"], "порядок важливий"
