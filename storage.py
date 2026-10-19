@@ -203,17 +203,32 @@ class MongoStore:
                 raise SystemExit(
                     "Для роботи з Mongo потрібен пакет pymongo: pip install -r requirements.txt"
                 ) from exc
+            # 🔑 Стиснення на дроті. Заміряно 2026-10-19: кожна операція з
+            # Atlas іде зі швидкістю ~75 КБ/с — і читання (1.3 МБ оголошень за
+            # 15.4 с), і запис (0.2 МБ watch'ів за 2.8 с), і це при тому, що
+            # `ping` коштує 0.2 с. Тобто вузьке місце не латентність і не
+            # кількість документів, а БАЙТИ: M0 — shared-кластер із
+            # обмеженою смугою, і за неї ми платимо щохвилини.
+            #
+            # Стан — це JSON-подібні документи з українськими назвами й
+            # посиланнями, тобто текст, який стискається в рази. zstd
+            # найкращий, zlib — запасний і не потребує нічого, крім
+            # стандартної бібліотеки; драйвер домовляється з сервером сам і
+            # бере перший спільний. Якщо `zstandard` не встановлено, pymongo
+            # просто попередить і візьме zlib.
             self.client = MongoClient(
                 uri,
                 appname="olx-watcher",
                 serverSelectionTimeoutMS=timeout_ms,
                 connectTimeoutMS=timeout_ms,
                 retryWrites=True,
+                compressors="zstd,zlib",
             )
         self.db = self.client[db_name]
         self.db_name = db_name
         self._snapshot: dict[str, Any] = empty_state()
         self._indexed = False
+        self._sizes_logged = False
 
     # ── службове ────────────────────────────────────────────────────────────
 
@@ -350,6 +365,13 @@ class MongoStore:
         `collStats` — одна команда на колекцію, без повторного кодування
         документів. Діагностика не сміє валити прогін, тож усе в try.
         """
+        if self._sizes_logged:
+            return
+        # ⚠ Один `collStats` коштує ~1.2 с (заміряно: чотири колекції = 5 с
+        # на прохід). У режимі --loop прохід іде щохвилини, тож це рядок на
+        # ЗАПУСК процесу, а не на прохід: обсяг за годину все одно не
+        # змінюється настільки, щоб платити за нього шістдесят разів.
+        self._sizes_logged = True
         parts = []
         for label, coll in (("оголошення", COLL_ADS), ("watch'і", COLL_WATCHES),
                             ("зняті", COLL_SOLD), ("ціни", COLL_PRICES)):
