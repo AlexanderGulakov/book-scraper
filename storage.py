@@ -72,7 +72,24 @@ COLL_PRICES = "price_observations"
 STATE_ID = "state"
 
 
-_WATCH_FIELDS_SKIP = {"ads"}
+# Поля watch'а, які в його документ НЕ пишуться.
+#
+# `ads` — бо вони окрема колекція, з подокументним записом; заради цього
+# переїзд зі state.json і робився.
+#
+# `dropped` — список відкинутих правилами id за 30 днів. Саме він робив
+# watch-документи по 4.8 КБ, тобто 0.2 МБ, які їхали і в кожному читанні, і в
+# кожному записі (а watch'і переписуються щопроходу через `last_run`).
+# Заміряно 2026-10-19: 2.8 с читання + 2.7 с запису на прохід.
+#
+# Платили ми за нього дарма. Він існує, щоб не перевіряти те саме оголошення
+# двічі, — але відколи JSON-пошук несе опис прямо у видачі, повторна перевірка
+# не коштує ЖОДНОГО запиту, лише арифметику (вся обробка проходу — 0.5 с).
+# А ручні позначки, які теж писали сюди, живуть ще й у `manual_ru`, і саме
+# звідти їх читає головний цикл, тож вони не загубляться.
+#
+# У межах процесу поле працює як працювало — просто не переживає перезапуск.
+_WATCH_FIELDS_SKIP = {"ads", "dropped"}
 
 
 def empty_state() -> dict[str, Any]:
@@ -109,6 +126,10 @@ class JsonStore:
         state.setdefault("version", STATE_VERSION)
         state.setdefault("watches", {})
         return state
+
+    def load_sold(self, state: dict[str, Any]) -> None:
+        """У файлі історія лежить разом з усім іншим — дочитувати нічого."""
+        state.setdefault("sold", [])
 
     def save(self, state: dict[str, Any]) -> None:
         import json
@@ -229,6 +250,7 @@ class MongoStore:
         self._snapshot: dict[str, Any] = empty_state()
         self._indexed = False
         self._sizes_logged = False
+        self._dropped_cleaned = False
 
     # ── службове ────────────────────────────────────────────────────────────
 
@@ -309,13 +331,29 @@ class MongoStore:
 
         t0 = time.monotonic()
         watches: dict[str, Any] = {}
+        fat = 0
         for doc in self.db[COLL_WATCHES].find({}):
             key = str(doc.pop("_id"))
             doc.pop("ads", None)
+            if doc.pop("dropped", None):
+                fat += 1
             doc["ads"] = {}
             watches[key] = doc
 
         t["watches"] = time.monotonic() - t0
+        # Разова чистка: поле більше не пишеться (`_WATCH_FIELDS_SKIP`), але
+        # в наявних документах лежить — і далі коштувало б нам тих самих
+        # секунд на кожному читанні. Саме прибрати його діфом не вийде:
+        # `_watch_doc` зрізає поле з обох боків порівняння, тож різниці він
+        # не побачить ніколи.
+        if fat and not self._dropped_cleaned:
+            self._dropped_cleaned = True
+            try:
+                self.db[COLL_WATCHES].update_many(
+                    {"dropped": {"$exists": True}}, {"$unset": {"dropped": ""}})
+                log.info("Mongo: прибрав `dropped` з %s watch-документів", fat)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("Не вдалось прибрати `dropped`: %s", exc)
 
         t0 = time.monotonic()
         n_ads = 0
@@ -331,14 +369,9 @@ class MongoStore:
         t["ads"] = time.monotonic() - t0
         state["watches"] = watches
 
-        t0 = time.monotonic()
-        sold = [
-            {k: v for k, v in doc.items() if k != "_id"}
-            for doc in self.db[COLL_SOLD].find({}).sort("gone", 1)
-        ]
-        t["sold"] = time.monotonic() - t0
-        if sold:
-            state["sold"] = sold
+        # `sold` тут НЕ читається — див. `load_sold()`. 964 документи
+        # (0.4 МБ, 5.1 с) потрібні лише звітам і аналітиці, тобто кільком
+        # проходам на добу, а читались щохвилини.
 
         # Знімок для діфа. Глибока копія обов'язкова: далі код мутує state
         # на місці, і поверхнева копія показала б «змін немає».
@@ -346,11 +379,35 @@ class MongoStore:
         self._snapshot = copy.deepcopy(state)
         t["копія"] = time.monotonic() - t0
 
-        log.info("Mongo читання: %s | оголошень %s, watch'ів %s, знятих %s",
+        log.info("Mongo читання: %s | оголошень %s, watch'ів %s",
                  ", ".join(f"{k} {v:.1f}" for k, v in t.items()),
-                 n_ads, len(watches), len(sold))
+                 n_ads, len(watches))
         self._log_sizes()
         return state
+
+    def load_sold(self, state: dict[str, Any]) -> None:
+        """Дочитати історію знятих у вже завантажений стан.
+
+        Навіщо окремо. `sold` потрібен трьом речам — звіту про зняті, денній
+        аналітиці й профілям цін (а профілі — лише коли справді є що слати).
+        Разом це кілька проходів на добу, а читалось воно щохвилини: 0.4 МБ і
+        5.1 с з прохoду, на якому найчастіше взагалі нічого не відбувається.
+
+        ⚠ Знімок оновлюємо РАЗОМ зі станом. Інакше `save()` порівняв би 964
+        записи з порожнечею і переписав би в базу всю історію — тобто
+        економія читання обернулась би вчетверо дорожчим записом.
+        """
+        if state.get("sold") is not None:
+            return
+        t0 = time.monotonic()
+        sold = [
+            {k: v for k, v in doc.items() if k != "_id"}
+            for doc in self.db[COLL_SOLD].find({}).sort("gone", 1)
+        ]
+        state["sold"] = sold
+        self._snapshot["sold"] = copy.deepcopy(sold)
+        log.info("Mongo: історія знятих дочитана — %s записів за %.1f с",
+                 len(sold), time.monotonic() - t0)
 
     def _log_sizes(self) -> None:
         """Скільки в колекціях байтів, а не лише документів.
@@ -447,7 +504,11 @@ class MongoStore:
         """
         self.db[COLL_WATCHES].delete_many({})
         self.db[COLL_ADS].delete_many({})
-        state = self.load()          # підтягне sold і meta, які лишились
+        state = self.load()          # підтягне meta, яка лишилась
+        # Історію дочитуємо явно, хоч звичайний прохід її й не читає:
+        # `--reset` саме про неї й говорить («sold збережено»), тож вона
+        # має бути в поверненому стані, а не чекати першого звіту.
+        self.load_sold(state)
         state["watches"] = {}
         self._snapshot = copy.deepcopy(state)
         log.warning("--reset: watches і ads очищено; sold і price_observations збережено")

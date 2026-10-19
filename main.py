@@ -692,7 +692,27 @@ def prune_told(state: dict[str, Any], days: int) -> int:
     return len(stale)
 
 
-def apply_marks(state: dict[str, Any]) -> int:
+def ensure_sold(store: Any, state: dict[str, Any]) -> None:
+    """Дочитати історію знятих, якщо її ще немає в стані.
+
+    Звичайний прохід її не читає (0.4 МБ і 5 с із кожної хвилини), тож усе,
+    що до неї звертається, спершу кличе сюди. Виклик ідемпотентний і дешевий:
+    щойно історія в стані, він нічого не робить.
+    """
+    if state.get("sold") is not None:
+        return
+    loader = getattr(store, "load_sold", None)
+    if loader is None:
+        state.setdefault("sold", [])
+        return
+    try:
+        loader(state)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Не вдалось дочитати історію знятих: %s", exc)
+        state.setdefault("sold", [])
+
+
+def apply_marks(state: dict[str, Any], ensure: Any = None) -> int:
     """Забирає з Telegram натискання кнопок під сповіщенням і застосовує їх.
 
     Навіщо взагалі ручна позначка. Мову видання інколи видно ЛИШЕ з обкладинки:
@@ -710,6 +730,11 @@ def apply_marks(state: dict[str, Any]) -> int:
         state["tg_offset"] = new_offset
     if not marks:
         return 0
+
+    # Позначка знімає `an` і з історії знятих теж — отже саме тут вона й
+    # потрібна. Поки натискань немає (майже завжди), історія не читається.
+    if ensure is not None:
+        ensure()
 
     now = datetime.now(timezone.utc).isoformat()
     for mark in marks:
@@ -1058,17 +1083,27 @@ def run(cfg: dict[str, Any], state: dict[str, Any], *, dry_run: bool,
     # і в профілі цін, і в «найдешевше зараз» цього ж прогону.
     if not dry_run:
         try:
-            marked = apply_marks(state)
+            marked = apply_marks(state, ensure=lambda: ensure_sold(store, state))
             if marked:
                 log.info("Застосовано ручних позначок: %s", marked)
         except Exception as exc:  # noqa: BLE001
             log.warning("Не вдалось прочитати позначки з Telegram: %s", exc)
 
-    try:
-        prof_map = analytics.profiles(cfg, state)
-    except Exception as exc:  # noqa: BLE001
-        log.warning("Не вдалось порахувати профілі цін: %s", exc)
-        prof_map = {}
+    # Профілі цін рахуються зі стану РАЗОМ з історією знятих, а та тепер
+    # дочитується на вимогу. Тому рахуємо їх не на початку проходу, а при
+    # першому ж сповіщенні: на тихому проході (а таких більшість) ні профілі,
+    # ні 0.4 МБ історії не потрібні взагалі.
+    _prof: dict[str, Any] = {}
+
+    def prof_map() -> dict[str, Any]:
+        if "map" not in _prof:
+            ensure_sold(store, state)
+            try:
+                _prof["map"] = analytics.profiles(cfg, state)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("Не вдалось порахувати профілі цін: %s", exc)
+                _prof["map"] = {}
+        return _prof["map"]
 
     # Найдешевше оголошення на кожну книжку — арифметика над станом, але з
     # однією перевіркою наживо перед самою відправкою: стан відстає на прогін,
@@ -1317,7 +1352,7 @@ def run(cfg: dict[str, Any], state: dict[str, Any], *, dry_run: bool,
                     with tm.took("найдешевше"):
                         cheap = cheapest.for_ad(name, ad)
                     msg = notify.Message(notify.format_event(
-                        "new", name, ad, verdict=_verdict(cfg, prof_map, name, ad),
+                        "new", name, ad, verdict=_verdict(cfg, prof_map(), name, ad),
                         mark=d.tag, cheapest=cheap),
                         mark_id=ad.id, cheap_id=(cheap or {}).get("id"),
                         cheap_near=notify.cheap_is_near(cheap, ad))
@@ -1348,7 +1383,7 @@ def run(cfg: dict[str, Any], state: dict[str, Any], *, dry_run: bool,
                         cheap = cheapest.for_ad(name, ad)
                     messages.append(notify.Message(notify.format_event(
                         "drop", name, ad, old_price=old,
-                        verdict=_verdict(cfg, prof_map, name, ad), mark=d.tag,
+                        verdict=_verdict(cfg, prof_map(), name, ad), mark=d.tag,
                         cheapest=cheap),
                         mark_id=ad.id, cheap_id=(cheap or {}).get("id"),
                         cheap_near=notify.cheap_is_near(cheap, ad)))
@@ -1458,6 +1493,7 @@ def run(cfg: dict[str, Any], state: dict[str, Any], *, dry_run: bool,
             and due({"last_run": state.get("sold_report_last")}, every) \
             and (store is None or store.claim("sold_report_last", now)):
         try:
+            ensure_sold(store, state)
             with tm.took("звіти"):
                 messages.extend(sold_report(
                     cfg, state, session,
@@ -1474,6 +1510,7 @@ def run(cfg: dict[str, Any], state: dict[str, Any], *, dry_run: bool,
     # питає в OLX і не залежить від того, чи вдався цей конкретний прогін.
     if reports and not dry_run:
         try:
+            ensure_sold(store, state)
             with tm.took("звіти"):
                 messages.extend(daily_book_report(cfg, state, store=store))
         except Exception as exc:  # noqa: BLE001
@@ -1925,6 +1962,7 @@ def main() -> int:
         store = storage.open_store(state_path=args.state, mode=args.storage,
                                    uri=args.mongo_uri, db_name=args.mongo_db)
         state = store.load()
+        ensure_sold(store, state)
         defaults = cfg.get("defaults", {}) or {}
         stats = sanitize(
             cfg, state, olx.build_session(),
@@ -1948,7 +1986,7 @@ def main() -> int:
         store = storage.open_store(state_path=args.state, mode=args.storage,
                                    uri=args.mongo_uri, db_name=args.mongo_db)
         state = store.load()
-        n = apply_marks(state)
+        n = apply_marks(state, ensure=lambda: ensure_sold(store, state))
         if n:
             store.save(state)
         log.info("Оброблено натискань: %s", n)
@@ -1959,6 +1997,7 @@ def main() -> int:
         store = storage.open_store(state_path=args.state, mode=args.storage,
                                    uri=args.mongo_uri, db_name=args.mongo_db)
         state = store.load()
+        ensure_sold(store, state)
         ids = []
         for raw in args.unexclude:
             ad_id = olx.ad_id_from(raw)
@@ -1982,6 +2021,7 @@ def main() -> int:
         store = storage.open_store(state_path=args.state, mode=args.storage,
                                    uri=args.mongo_uri, db_name=args.mongo_db)
         state = store.load()
+        ensure_sold(store, state)
         added = 0
         for raw_list, why in ((args.mark_ru, "ru"), (args.exclude, "bad")):
             for raw in raw_list:

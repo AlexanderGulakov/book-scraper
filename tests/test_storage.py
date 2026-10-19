@@ -72,8 +72,16 @@ def test_mongo_returns_exactly_the_shape_the_file_had():
     original = sample_state()
     store.save(original)
 
+    # `sold` навмисно не читається у звичайному проході: 0.4 МБ і 5 с із
+    # кожної хвилини заради даних, потрібних кільком проходам на добу
+    # (замір 2026-10-19). Після `load_sold()` форма збігається з файловою.
     reader = storage.MongoStore("mongodb://ignored", "test_db", client=store.client)
-    assert reader.load() == original
+    state = reader.load()
+    assert "sold" not in state, "історію читаємо лише на вимогу"
+    assert state == {k: v for k, v in original.items() if k != "sold"}
+
+    reader.load_sold(state)
+    assert state == original
 
 
 def test_json_store_round_trip(tmp_path):
@@ -399,3 +407,58 @@ def test_migration_does_not_duplicate_the_same_sale_twice():
     st = {"watches": {}, "sold": [{"id": "1", "watch": "Кінг", "gone": "2026-09-01T00:00:00+00:00"}]}
     merged = migrate_state.merge_states([st, dict(st)])
     assert len(merged["sold"]) == 1
+
+
+# ── ліниве читання історії і схуднення watch-документів (2026-10-19) ─────────
+
+def test_lazy_sold_does_not_turn_into_a_rewrite():
+    """🔑 Пастка економії: дочитана історія не сміє виглядати як нова.
+
+    `save()` пише різницю зі знімком. Якщо `load_sold()` покладе записи в
+    стан, але не в знімок, наступний запис вирішить, що вся історія з'явилась
+    щойно, — і економія на читанні обернеться дорожчим записом.
+    """
+    store = fresh_store()
+    store.save(sample_state())
+
+    reader = storage.MongoStore("mongodb://ignored", "test_db", client=store.client)
+    state = reader.load()
+    reader.load_sold(state)
+    assert reader.save(state)["sold"] == 0
+
+    state["sold"][0]["price"] = 650.0
+    assert reader.save(state)["sold"] == 1, "справжня зміна має доїхати"
+
+
+def test_lazy_sold_is_idempotent():
+    """Його кличуть з кількох місць поспіль — другий виклик має бути дармовим."""
+    store = fresh_store()
+    store.save(sample_state())
+    reader = storage.MongoStore("mongodb://ignored", "test_db", client=store.client)
+    state = reader.load()
+    reader.load_sold(state)
+    state["sold"].append({"id": "x", "watch": "w", "gone": "2026-10-19T00:00:00+00:00"})
+    reader.load_sold(state)
+    assert len(state["sold"]) == 2, "повторне читання не сміє затерти стан"
+
+
+def test_dropped_is_not_stored_and_old_ones_are_cleaned():
+    """`dropped` робив watch-документи товстими, а користі вже не давав.
+
+    Перевіряємо і те, що поле більше не пишеться, і разову чистку: самим
+    діфом її не зробити — `_watch_doc` зрізає поле з ОБОХ боків порівняння,
+    тож різниці він не побачить ніколи.
+    """
+    store = fresh_store()
+    state = sample_state()
+    key = next(iter(state["watches"]))
+    state["watches"][key]["dropped"] = {"111": "2026-10-01T00:00:00+00:00"}
+    store.save(state)
+    assert "dropped" not in store.db[storage.COLL_WATCHES].find_one({"_id": key})
+
+    # Документ зі старим полем — такий, як у живій базі до цієї правки.
+    store.db[storage.COLL_WATCHES].update_one(
+        {"_id": key}, {"$set": {"dropped": {"222": "2026-10-01T00:00:00+00:00"}}})
+    reader = storage.MongoStore("mongodb://ignored", "test_db", client=store.client)
+    reader.load()
+    assert "dropped" not in store.db[storage.COLL_WATCHES].find_one({"_id": key})
