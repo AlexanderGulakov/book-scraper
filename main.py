@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import logging
 import os
 import random
@@ -899,10 +900,46 @@ def heartbeat_due(opt: dict[str, Any], ws: dict[str, Any]) -> bool:
     return due({"last_run": ws.get("heartbeat_last")}, float(hours) * 60)
 
 
+class Timings(dict):
+    """Скільки секунд з'їла кожна стаття проходу.
+
+    Навіщо. Прохід знову переріс хвилину (2026-10-19), і перше ж питання —
+    куди пішов час: у забір видачі, який уже паралельний, чи в послідовний
+    хвіст (читання й запис стану, «найдешевше зараз», описи, Telegram,
+    звіти). Досі свій рядок у лог писав лише `_prefetch_feeds`, а решта
+    проходу мовчала, тож відповідь доводилось вгадувати з коду. Тепер кожне
+    таке рішення — цифра, і дивитись на неї можна з логу Actions, а не лише
+    звідти: рядок короткий і йде на кожному проході.
+
+    Це лічильник, а не профайлер: статей десяток, ціна — два
+    `time.monotonic()` на статтю, тож він стоїть у бойовому коді завжди.
+
+    ⚠ Статті НЕ можна вкладати одна в одну — час порахувався б двічі, і
+    «решта» поїхала б у мінус. Тому `took()` стоїть лише на листках (мережа,
+    Mongo, Telegram), а чиста арифметика над станом окремо не міряється: вона
+    і є «решта».
+    """
+
+    @contextlib.contextmanager
+    def took(self, name: str) -> Any:
+        t0 = time.monotonic()
+        try:
+            yield
+        finally:
+            self[name] = self.get(name, 0.0) + time.monotonic() - t0
+
+    def line(self, total: float) -> str:
+        """Рядок для логу: статті за спаданням плюс «решта» — чистий CPU."""
+        parts = [f"{k} {v:.1f}" for k, v in
+                 sorted(self.items(), key=lambda kv: -kv[1]) if v >= 0.05]
+        parts.append(f"решта {total - sum(self.values()):.1f}")
+        return f"{total:.1f} с = " + ", ".join(parts)
+
+
 def run(cfg: dict[str, Any], state: dict[str, Any], *, dry_run: bool,
         only: list[str] | None = None, skip: list[str] | None = None,
         store: Any = None, reports: bool = True,
-        sender: Any = None) -> tuple[list[str], int]:
+        sender: Any = None, timings: Timings | None = None) -> tuple[list[str], int]:
     """`store` потрібен лише для заявки на звіти (див. `Store.claim`).
 
     `reports=False` вимикає обидва глобальні звіти — про зняті з продажу і
@@ -914,6 +951,7 @@ def run(cfg: dict[str, Any], state: dict[str, Any], *, dry_run: bool,
     працюють два незалежні прогони.
     """
     defaults = cfg.get("defaults", {}) or {}
+    tm = timings if timings is not None else Timings()
     session = olx.build_session()
     messages: list[str] = []
     errors = 0
@@ -949,12 +987,13 @@ def run(cfg: dict[str, Any], state: dict[str, Any], *, dry_run: bool,
     # Найдешевше оголошення на кожну книжку — арифметика над станом, але з
     # однією перевіркою наживо перед самою відправкою: стан відстає на прогін,
     # і посилання встигає померти. Див. CheapestNow.
-    cheapest = CheapestNow(
-        cfg, state, session,
-        verify=bool(defaults.get("cheapest_verify", True)) and not dry_run,
-        budget=int(defaults.get("cheapest_verify_max", 12)),
-        depth=int(defaults.get("cheapest_verify_depth", 3)),
-    )
+    with tm.took("найдешевше"):
+        cheapest = CheapestNow(
+            cfg, state, session,
+            verify=bool(defaults.get("cheapest_verify", True)) and not dry_run,
+            budget=int(defaults.get("cheapest_verify_max", 12)),
+            depth=int(defaults.get("cheapest_verify_depth", 3)),
+        )
 
     # Бюджет описів — НА ПРОГІН, а не на watch. Двадцять один watch по тридцять
     # описів кожен — це шістсот зайвих запитів у найгіршому випадку, тобто
@@ -978,7 +1017,8 @@ def run(cfg: dict[str, Any], state: dict[str, Any], *, dry_run: bool,
     def flush() -> None:
         if sender is None or dry_run or not messages:
             return
-        sender.send(list(messages))
+        with tm.took("Telegram"):
+            sender.send(list(messages))
         messages.clear()
 
     # Видачу OLX забираємо наперед і паралельно. Умови добору тут МУСЯТЬ
@@ -1001,10 +1041,11 @@ def run(cfg: dict[str, Any], state: dict[str, Any], *, dry_run: bool,
     feeds: dict[str, Any] = {}
     if jobs:
         t0 = time.monotonic()
-        feeds = _prefetch_feeds(
-            jobs, session, workers=watch_workers,
-            pause=float(defaults.get("pause_between_watches", 1)),
-            search_api=search_api, api_fallback=api_fallback)
+        with tm.took("видача"):
+            feeds = _prefetch_feeds(
+                jobs, session, workers=watch_workers,
+                pause=float(defaults.get("pause_between_watches", 1)),
+                search_api=search_api, api_fallback=api_fallback)
         log.info("Видача зібрана: %s запит(ів) за %.1f с (потоків: %s)",
                  len(jobs), time.monotonic() - t0, min(watch_workers, len(jobs)))
 
@@ -1161,13 +1202,14 @@ def run(cfg: dict[str, Any], state: dict[str, Any], *, dry_run: bool,
             # фільтри наосліп. Тепер опис є в кожного.
             desc = (prev or {}).get("desc") or getattr(ad, "description", None)
             if want_desc and desc is None and prev is None and desc_left[0] > 0:
-                desc = olx.fetch_description(session, ad.url)
-                desc_left[0] -= 1
+                with tm.took("описи"):
+                    desc = olx.fetch_description(session, ad.url)
+                    desc_left[0] -= 1
                 # Сторінка оголошення легша за сторінку пошуку, тож і пауза
                 # менша: при сорока описах за прогін кожна зайва секунда — це
                 # сорок секунд життя воркфлоу.
-                time.sleep(float(defaults.get("description_pause", 0.4))
-                           + random.uniform(0, 0.6))
+                    time.sleep(float(defaults.get("description_pause", 0.4))
+                               + random.uniform(0, 0.6))
 
             d = rules.decide(title=ad.title, price=ad.price, watch=opt,
                              entry=entry, description=desc,
@@ -1186,7 +1228,8 @@ def run(cfg: dict[str, Any], state: dict[str, Any], *, dry_run: bool,
 
             if prev is None:
                 if d.notify and not told_before(state, ad, "new"):
-                    cheap = cheapest.for_ad(name, ad)
+                    with tm.took("найдешевше"):
+                        cheap = cheapest.for_ad(name, ad)
                     msg = notify.Message(notify.format_event(
                         "new", name, ad, verdict=_verdict(cfg, prof_map, name, ad),
                         mark=d.tag, cheapest=cheap),
@@ -1215,7 +1258,8 @@ def run(cfg: dict[str, Any], state: dict[str, Any], *, dry_run: bool,
                     and ad.price < old * (1 - threshold)
                 )
                 if cheaper and not told_before(state, ad, "drop"):
-                    cheap = cheapest.for_ad(name, ad)
+                    with tm.took("найдешевше"):
+                        cheap = cheapest.for_ad(name, ad)
                     messages.append(notify.Message(notify.format_event(
                         "drop", name, ad, old_price=old,
                         verdict=_verdict(cfg, prof_map, name, ad), mark=d.tag,
@@ -1328,13 +1372,14 @@ def run(cfg: dict[str, Any], state: dict[str, Any], *, dry_run: bool,
             and due({"last_run": state.get("sold_report_last")}, every) \
             and (store is None or store.claim("sold_report_last", now)):
         try:
-            messages.extend(sold_report(
-                cfg, state, session,
-                max_checks=int(defaults.get("sold_report_max_checks", 60)),
-                pause=float(defaults.get("sold_report_pause", 1.5)),
-                workers=int(defaults.get("sold_report_workers", 4)),
-                max_age_days=defaults.get("sold_check_max_age_days", 14),
-            ))
+            with tm.took("звіти"):
+                messages.extend(sold_report(
+                    cfg, state, session,
+                    max_checks=int(defaults.get("sold_report_max_checks", 60)),
+                    pause=float(defaults.get("sold_report_pause", 1.5)),
+                    workers=int(defaults.get("sold_report_workers", 4)),
+                    max_age_days=defaults.get("sold_check_max_age_days", 14),
+                ))
             state["sold_report_last"] = now
         except Exception as exc:  # noqa: BLE001
             log.warning("Звіт про зняті не склався: %s", exc)
@@ -1343,7 +1388,8 @@ def run(cfg: dict[str, Any], state: dict[str, Any], *, dry_run: bool,
     # питає в OLX і не залежить від того, чи вдався цей конкретний прогін.
     if reports and not dry_run:
         try:
-            messages.extend(daily_book_report(cfg, state, store=store))
+            with tm.took("звіти"):
+                messages.extend(daily_book_report(cfg, state, store=store))
         except Exception as exc:  # noqa: BLE001
             log.warning("Денний звіт про ціни не склався: %s", exc)
 
@@ -1515,7 +1561,10 @@ def one_pass(args: Any, cfg: dict[str, Any], store: Any) -> int:
     прогрів curl_cffi і конект до Mongo. Стан читається й пишеться КОЖНОГО
     проходу, бо в ту саму базу паралельно пише домашній Букфлі.
     """
-    state = store.reset() if args.reset else store.load()
+    tm = Timings()
+    t_pass = time.monotonic()
+    with tm.took("стан:читання"):
+        state = store.reset() if args.reset else store.load()
 
     gone = forget_orphans(cfg, state)
     if gone:
@@ -1534,7 +1583,8 @@ def one_pass(args: Any, cfg: dict[str, Any], store: Any) -> int:
 
     messages, errors = run(cfg, state, dry_run=args.dry_run, only=args.only,
                            skip=args.skip, store=store,
-                           reports=not args.no_reports, sender=sender)
+                           reports=not args.no_reports, sender=sender,
+                           timings=tm)
 
     if messages and not channels:
         log.error("Є %s подій, але жодного налаштованого каналу сповіщень!", len(messages))
@@ -1543,8 +1593,9 @@ def one_pass(args: Any, cfg: dict[str, Any], store: Any) -> int:
     elif sender is not None:
         # Хвіст: останній watch і звіти. Через той самий Sender, щоб ліміт на
         # прогін лишився спільним, а не подвоївся.
-        undelivered = sender.failed + sender.send(messages)
-        sender.finish()
+        with tm.took("Telegram"):
+            undelivered = sender.failed + sender.send(messages)
+            sender.finish()
         if undelivered:
             log.error("НЕ доставлено %s повідомлень — див. відповідь Telegram/SMTP вище",
                       undelivered)
@@ -1552,7 +1603,8 @@ def one_pass(args: Any, cfg: dict[str, Any], store: Any) -> int:
         elif sender.sent:
             log.info("Надіслано %s сповіщень (по ходу прогону)", sender.sent)
     else:
-        undelivered = notify.dispatch(channels, messages)
+        with tm.took("Telegram"):
+            undelivered = notify.dispatch(channels, messages)
         if messages and undelivered:
             log.error("НЕ доставлено %s повідомлень — див. відповідь Telegram/SMTP вище", undelivered)
             errors += 1
@@ -1566,8 +1618,14 @@ def one_pass(args: Any, cfg: dict[str, Any], store: Any) -> int:
     if undelivered:
         log.error("Стан НЕ збережено: наступний прогін спробує надіслати ці ж події ще раз")
     else:
-        store.save(state)
+        with tm.took("стан:запис"):
+            store.save(state)
         log.info("Стан збережено: %s", store.describe())
+
+    # Куди пішов час. Рядок іде на КОЖНОМУ проході, а не лише коли прохід
+    # переріс період: «повільно» і «повільно саме тут» — різні повідомлення, і
+    # друге корисне ще до того, як стане погано. Див. `Timings`.
+    log.info("Прохід: %s", tm.line(time.monotonic() - t_pass))
 
     # Не валимо workflow через тимчасову помилку мережі, якщо хоч щось спрацювало.
     if errors and errors >= max(len(selected), 1):
