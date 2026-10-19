@@ -3,11 +3,13 @@ PyYAML>=6.0,<7
 # Стан живе в MongoDB Atlas. dnspython іде в залежностях pymongo і потрібен
 # для рядків mongodb+srv:// — без нього Atlas не резолвиться.
 pymongo>=4.10,<5
-# Стиснення трафіку до Atlas. M0 — shared-кластер, і заміряно, що кожна
-# операція йде ~75 КБ/с; стан — текст, тож zstd зменшує його в рази, а разом
-# з ним і час читання/запису. Без цього пакета pymongo візьме zlib зі
-# стандартної бібліотеки — повільніше, але теж працює.
-zstandard>=0.22
+# Стиснення трафіку до Atlas. ⚠ Пакет саме `backports.zstd`, а НЕ
+# `zstandard`: з 4.16 pymongo перейшов на stdlib-модуль `compression.zstd`
+# (він з'явився в Python 3.14), а для старіших версій бере його бекпорт.
+# Зі `zstandard` драйвер мовчки лишався без zstd і писав у лог
+# «Wire protocol compression with zstandard is not available» — рівно це й
+# сталось на раннері з Python 3.12.
+backports.zstd>=1.0; python_version < "3.14"
 beautifulsoup4>=4.12,<5
 lxml>=6.0
 # Прикидається справжнім Chrome на рівні TLS — без цього OLX віддає 403
